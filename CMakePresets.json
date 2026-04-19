@@ -1,0 +1,37 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "msvc-qt-local",
+      "displayName": "Visual Studio 2022 + Qt (project qt-sdk)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "${sourceDir}/qt-sdk/6.8.3/msvc2022_64"
+      }
+    },
+    {
+      "name": "ninja-qt-local",
+      "displayName": "Ninja + Qt (project qt-sdk)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-ninja",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "${sourceDir}/qt-sdk/6.8.3/msvc2022_64"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release",
+      "configurePreset": "msvc-qt-local",
+      "configuration": "Release"
+    },
+    {
+      "name": "debug",
+      "configurePreset": "msvc-qt-local",
+      "configuration": "Debug"
+    }
+  ]
+}

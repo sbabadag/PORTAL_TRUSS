@@ -1,0 +1,15 @@
+/build/
+/build-*/
+/qt-sdk/
+/third_party/opensees-source/
+/third_party/opensees-berkeley/
+/third_party/cache/
+/third_party/*.zip
+*.zip
+aqtinstall.log
+**/aqtinstall.log
+qt-elements.txt
+CMakeLists.txt.user
+*.user
+.vs/
+out/
