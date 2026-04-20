@@ -295,15 +295,24 @@ QString buildTcl(const PortalFrameInput &in, const PortalFrameResult &geo, const
         nodeList += QString::number(n.tag);
     }
 
+    /** GussetStrip: Tcl’de elasticBeamColumn (6 yerel bileşen); basicForces yalnızca 3 değer — makas kaydına koymak tüm kuvvet satırını kaydırır. */
+    auto usesBeamForceRecorder = [](const MemberResult &m) {
+        return !m.isTruss || m.trussRole == TrussMemberRole::GussetStrip;
+    };
+    auto usesTrussForceRecorder = [](const MemberResult &m) {
+        return m.isTruss && m.trussRole != TrussMemberRole::GussetStrip;
+    };
+
     QString beamEles;
     QString trussEles;
     for (const auto &m : geo.members) {
-        if (!m.isTruss) {
+        if (usesBeamForceRecorder(m)) {
             if (!beamEles.isEmpty()) {
                 beamEles += ' ';
             }
             beamEles += QString::number(m.tag);
-        } else {
+        }
+        if (usesTrussForceRecorder(m)) {
             if (!trussEles.isEmpty()) {
                 trussEles += ' ';
             }
@@ -394,7 +403,8 @@ void parseBeamForcesLine(const QList<double> &vals, PortalFrameResult &geo)
     }
     int idx = 1;
     for (auto &m : geo.members) {
-        if (!m.isTruss) {
+        const bool beamRec = !m.isTruss || m.trussRole == TrussMemberRole::GussetStrip;
+        if (beamRec) {
             if (idx + 5 < static_cast<int>(vals.size())) {
                 const double n1 = vals[idx];
                 const double n2 = vals[idx + 3];
@@ -414,7 +424,7 @@ void parseTrussForcesLine(const QList<double> &vals, PortalFrameResult &geo)
     }
     int idx = 1;
     for (auto &m : geo.members) {
-        if (m.isTruss) {
+        if (m.isTruss && m.trussRole != TrussMemberRole::GussetStrip) {
             if (idx + 2 < static_cast<int>(vals.size())) {
                 m.axial_N = vals[idx];
                 m.moment_i_Nm = vals[idx + 1];
