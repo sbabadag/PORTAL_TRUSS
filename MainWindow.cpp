@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <optional>
 
 #include <QBrush>
 #include <QFont>
@@ -15,14 +17,20 @@
 #include <QGraphicsEllipseItem>
 #include <QGraphicsTextItem>
 #include <QGraphicsPolygonItem>
-#include <QGraphicsRectItem>
 #include <QPainter>
 #include <QPen>
 #include <QMessageBox>
 #include <QPolygonF>
 #include <QResizeEvent>
 #include <QGraphicsScene>
+#include <QTextEdit>
+#include <QCheckBox>
 #include <QComboBox>
+#include <QLineEdit>
+#include <QLabel>
+#include <QFormLayout>
+#include <QHBoxLayout>
+#include <QVBoxLayout>
 
 namespace {
 
@@ -86,6 +94,37 @@ QString stripProfileSuffix(const QString &s)
     return t.trimmed();
 }
 
+QString memberProfileLabel(const MemberResult &m, const SectionOptimizationResult &opt)
+{
+    if (!m.isTruss) {
+        return stripProfileSuffix(opt.columnProfile);
+    }
+    switch (m.trussRole) {
+    case TrussMemberRole::ChordBottom:
+    case TrussMemberRole::GussetStrip:
+        return stripProfileSuffix(opt.trussBottomChord2xL);
+    case TrussMemberRole::ChordTop:
+        return stripProfileSuffix(opt.trussTopChord2xL);
+    case TrussMemberRole::EdgePost:
+        return stripProfileSuffix(opt.trussEdgePost2xL);
+    case TrussMemberRole::Web:
+        switch (m.webOptZone) {
+        case 0:
+            return stripProfileSuffix(opt.trussTopChord2xL);
+        case 1:
+            return stripProfileSuffix(opt.trussWebB2xL);
+        case 2:
+            return stripProfileSuffix(opt.trussWebC2xL);
+        case 3:
+            return stripProfileSuffix(opt.trussWebD2xL);
+        default:
+            return stripProfileSuffix(opt.trussWebC2xL);
+        }
+    default:
+        return {};
+    }
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent)
@@ -94,8 +133,75 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
 
+    // Sol panel formu pencere yüksekliğini doldursun; sağda çizim alanı esnesin.
+    ui->horizontalLayout_main->setStretch(0, 0);
+    ui->horizontalLayout_main->setStretch(1, 1);
+    ui->verticalLayout_sidebar->setStretch(0, 0);
+    ui->verticalLayout_sidebar->setStretch(1, 1);
+    ui->verticalLayout_sidebar->setStretch(2, 0);
+    ui->verticalLayout_sidebar->setStretch(3, 0);
+    ui->verticalLayout_view->setStretch(0, 0);
+    ui->verticalLayout_view->setStretch(1, 1);
+    ui->verticalLayout_view->setStretch(2, 0);
+
     ui->combo_columnFamily->addItems({QStringLiteral("HEA"), QStringLiteral("HEB"), QStringLiteral("IPE")});
     ui->combo_columnFamily->setCurrentIndex(1); // varsayılan test: HEB
+
+    m_comboColumnBase = new QComboBox(ui->scrollAreaWidgetContents);
+    m_comboColumnBase->addItem(tr("Ankastre (fixed)"), static_cast<int>(ColumnBaseSupport::Fixed));
+    m_comboColumnBase->addItem(tr("Mafsallı (pinned)"), static_cast<int>(ColumnBaseSupport::Pinned));
+    m_comboColumnBase->setCurrentIndex(0);
+    m_comboColumnBase->setToolTip(
+        tr("Statik model: ankastre tabanda ux, uy ve dönme tutulu; mafsallıda tabanda dönme serbest. "
+           "OpenSees kolon/gusset ayakları buna göre fixlenir."));
+    auto *lblColBase = new QLabel(tr("Kolon tabanı"), ui->scrollAreaWidgetContents);
+    lblColBase->setToolTip(m_comboColumnBase->toolTip());
+    ui->formLayout->insertRow(5, lblColBase, m_comboColumnBase);
+
+    m_lineColumnZzBuckling = new QLineEdit(ui->scrollAreaWidgetContents);
+    m_lineColumnZzBuckling->setPlaceholderText(tr("e.g. 0.33, 0.66"));
+    m_lineColumnZzBuckling->setToolTip(
+        tr("Z-z eksenel burkulma (Euler Iz) için tutuluş h/H (0..1), virgülle.\n"
+           "Doluysa yalnızca bu oranlar kullanılır (elle/makas listesi z-z için devre dışı).\n"
+           "Boşsa: «Lateral brace h/H» + isteğe bağlı makas geometrisi birleşimi kullanılır."));
+    auto *lblZzBuck = new QLabel(tr("Z-z buckling brace h/H"), ui->scrollAreaWidgetContents);
+    lblZzBuck->setToolTip(m_lineColumnZzBuckling->toolTip());
+    ui->formLayout->insertRow(24, lblZzBuck, m_lineColumnZzBuckling);
+
+    m_lineColumnLtbBottom = new QLineEdit(ui->scrollAreaWidgetContents);
+    m_lineColumnLtbBottom->setPlaceholderText(tr("e.g. 0.5"));
+    m_lineColumnLtbBottom->setToolTip(
+        tr("LTB: alt başlık (flanş) yanal tutuluş h/H — Mcr ve χ_LT (güçlü eksen eğilme)."));
+    auto *lblLtbB = new QLabel(tr("LTB alt başlık h/H"), ui->scrollAreaWidgetContents);
+    lblLtbB->setToolTip(m_lineColumnLtbBottom->toolTip());
+    ui->formLayout->insertRow(25, lblLtbB, m_lineColumnLtbBottom);
+
+    m_lineColumnLtbTop = new QLineEdit(ui->scrollAreaWidgetContents);
+    m_lineColumnLtbTop->setPlaceholderText(tr("e.g. 0.5"));
+    m_lineColumnLtbTop->setToolTip(
+        tr("LTB: üst başlık yanal tutuluş h/H — Mcr ve χ_LT.\n"
+           "Alt ve üst doluysa Mcr ≈ min(Mcr alt, Mcr üst) (muhafazakâr)."));
+    auto *lblLtbT = new QLabel(tr("LTB üst başlık h/H"), ui->scrollAreaWidgetContents);
+    lblLtbT->setToolTip(m_lineColumnLtbTop->toolTip());
+    ui->formLayout->insertRow(26, lblLtbT, m_lineColumnLtbTop);
+
+    m_comboColumnLtbCurve = new QComboBox(ui->scrollAreaWidgetContents);
+    m_comboColumnLtbCurve->addItems({QStringLiteral("A0 (α=0,13)"), QStringLiteral("A (0,21)"),
+                                     QStringLiteral("B (0,34)"), QStringLiteral("C (0,49)"),
+                                     QStringLiteral("D (0,76)")});
+    m_comboColumnLtbCurve->setCurrentIndex(2);
+    m_comboColumnLtbCurve->setToolTip(tr("LTB χ_LT için imperfection eğrisi (Tablo 6.3 yaklaşımı)."));
+    auto *lblLtbCurve = new QLabel(tr("LTB χ curve"), ui->scrollAreaWidgetContents);
+    lblLtbCurve->setToolTip(m_comboColumnLtbCurve->toolTip());
+    ui->formLayout->insertRow(27, lblLtbCurve, m_comboColumnLtbCurve);
+
+    const QStringList bucklingCurves = {QStringLiteral("A0 (α=0,13)"), QStringLiteral("A (0,21)"),
+                                        QStringLiteral("B (0,34)"), QStringLiteral("C (0,49)"),
+                                        QStringLiteral("D (0,76)")};
+    ui->combo_colBucklingCurve->addItems(bucklingCurves);
+    ui->combo_trussBucklingCurve->addItems(bucklingCurves);
+    ui->combo_colBucklingCurve->setCurrentIndex(2);
+    ui->combo_trussBucklingCurve->setCurrentIndex(2);
 
     m_scene = new QGraphicsScene(this);
     ui->graphicsView->setScene(m_scene);
@@ -116,8 +222,23 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->spin_dl2, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
     connect(ui->spin_sk, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
     connect(ui->spin_wl, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
+    connect(ui->spin_colBucklingKy, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+            [this](double) { setupScene(); });
+    connect(ui->spin_colBucklingKz, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+            [this](double) { setupScene(); });
+    connect(ui->combo_colBucklingCurve, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int) { setupScene(); });
+    connect(ui->combo_trussBucklingCurve, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int) { setupScene(); });
+    connect(ui->check_colBraceFromTruss, &QCheckBox::toggled, this, [this](bool) { setupScene(); });
+    connect(ui->line_colBraceHeights, &QLineEdit::editingFinished, this, [this]() { setupScene(); });
+    connect(m_lineColumnZzBuckling, &QLineEdit::editingFinished, this, [this]() { setupScene(); });
+    connect(m_lineColumnLtbBottom, &QLineEdit::editingFinished, this, [this]() { setupScene(); });
+    connect(m_lineColumnLtbTop, &QLineEdit::editingFinished, this, [this]() { setupScene(); });
+    connect(m_comboColumnLtbCurve, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) { setupScene(); });
     connect(ui->combo_columnFamily, qOverload<int>(&QComboBox::currentIndexChanged), this,
             [this](int) { setupScene(); });
+    connect(m_comboColumnBase, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) { setupScene(); });
     connect(ui->spin_fy, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
 
     ui->spin_apexHeight->setReadOnly(true);
@@ -158,7 +279,54 @@ PortalFrameInput MainWindow::collectInput() const
     in.sk_kN_per_m2 = ui->spin_sk->value();
     in.wl_kN_per_m2 = ui->spin_wl->value();
     in.columnFamilyIndex = ui->combo_columnFamily->currentIndex();
+    in.columnBaseSupport =
+        static_cast<ColumnBaseSupport>(m_comboColumnBase->currentData().toInt());
+    in.columnLtbCurveOrdinal = m_comboColumnLtbCurve ? m_comboColumnLtbCurve->currentIndex() : 2;
+    auto parseFracList = [](const QString &txt, std::vector<double> *out) {
+        out->clear();
+        const QString t = txt.trimmed();
+        if (t.isEmpty()) {
+            return;
+        }
+        const QStringList parts = t.split(QLatin1Char(','), Qt::SkipEmptyParts);
+        for (const QString &p : parts) {
+            bool ok = false;
+            const double v = p.trimmed().toDouble(&ok);
+            if (ok && v > 1e-6 && v < 1.0 - 1e-6) {
+                out->push_back(v);
+            }
+        }
+        std::sort(out->begin(), out->end());
+        out->erase(std::unique(out->begin(), out->end()), out->end());
+    };
+    parseFracList(m_lineColumnZzBuckling ? m_lineColumnZzBuckling->text() : QString(),
+                  &in.columnZzBucklingBraceHeightFractions);
+    parseFracList(m_lineColumnLtbBottom ? m_lineColumnLtbBottom->text() : QString(),
+                  &in.columnLtbBottomFlangeBraceHeightFractions);
+    parseFracList(m_lineColumnLtbTop ? m_lineColumnLtbTop->text() : QString(),
+                  &in.columnLtbTopFlangeBraceHeightFractions);
     in.fy_MPa = ui->spin_fy->value();
+    in.columnBucklingKy = ui->spin_colBucklingKy->value();
+    in.columnBucklingKz = ui->spin_colBucklingKz->value();
+    in.columnBucklingCurveOrdinal = ui->combo_colBucklingCurve->currentIndex();
+    in.trussBucklingCurveOrdinal = ui->combo_trussBucklingCurve->currentIndex();
+    in.columnLateralBraceFromTrussGeometry = ui->check_colBraceFromTruss->isChecked();
+    in.columnLateralBraceHeightFractions.clear();
+    const QString braceTxt = ui->line_colBraceHeights->text().trimmed();
+    if (!braceTxt.isEmpty()) {
+        const QStringList parts = braceTxt.split(QLatin1Char(','), Qt::SkipEmptyParts);
+        for (const QString &p : parts) {
+            bool ok = false;
+            const double v = p.trimmed().toDouble(&ok);
+            if (ok && v > 1e-6 && v < 1.0 - 1e-6) {
+                in.columnLateralBraceHeightFractions.push_back(v);
+            }
+        }
+        std::sort(in.columnLateralBraceHeightFractions.begin(), in.columnLateralBraceHeightFractions.end());
+        in.columnLateralBraceHeightFractions.erase(
+            std::unique(in.columnLateralBraceHeightFractions.begin(), in.columnLateralBraceHeightFractions.end()),
+            in.columnLateralBraceHeightFractions.end());
+    }
     return in;
 }
 
@@ -292,7 +460,134 @@ void MainWindow::drawFrameFromResult(const PortalFrameResult &result, const Port
         }
         auto *li = m_scene->addLine(line, penUse);
         li->setZValue(1);
+
+        /** Alt/üst başlık tek 2×L kesiti — küçük segment etiketi yok; döngüden sonra tek büyük etiket. */
+        const bool skipSmallChordLabel =
+            m.isTruss
+            && (m.trussRole == TrussMemberRole::ChordBottom || m.trussRole == TrussMemberRole::ChordTop);
+
+        const QString pLbl = memberProfileLabel(m, opt);
+        if (!skipSmallChordLabel && !pLbl.isEmpty() && pLbl != QStringLiteral("—")) {
+            const QPointF mid = (p1 + p2) * 0.5;
+            QPointF pos = mid;
+            const double dx = p2.x() - p1.x();
+            const double dy = p2.y() - p1.y();
+            const double len = std::hypot(dx, dy);
+            if (len > 1e-6) {
+                const double ux = dx / len;
+                const double uy = dy / len;
+                pos += QPointF(-uy, ux) * 9.0;
+            }
+            auto *ti = m_scene->addSimpleText(pLbl, QFont(QStringLiteral("Segoe UI"), 7, QFont::DemiBold));
+            ti->setBrush(QColor(22, 22, 22));
+            const QRectF tb = ti->boundingRect();
+            ti->setTransformOriginPoint(tb.center());
+            ti->setPos(pos.x() - 0.5 * tb.width(), pos.y() - 0.5 * tb.height());
+            double deg = 0.0;
+            if (len > 1e-6) {
+                deg = std::atan2(dy, dx) * 180.0 / 3.14159265358979323846;
+                /** Okunabilirlik: metin ters dönmesin (|açı| > 90° ise 180° çevir). */
+                if (deg > 90.0) {
+                    deg -= 180.0;
+                } else if (deg < -90.0) {
+                    deg += 180.0;
+                }
+            }
+            ti->setRotation(deg);
+            ti->setZValue(5);
+        }
     }
+
+    /** Makas alt hat: tek kesit → tek büyük etiket. Üst hat: mahya sol/sağ iki yarı ayrı (tekrar yok, overlap az). */
+    const double ridgeX = 0.5 * input.spanWidth_m;
+    const double kChordOffPx = 13.0;
+
+    auto addChordGroupLabelFiltered = [&](TrussMemberRole role, const QString &txt,
+                                          const std::function<bool(double mx, double my)> &useSegment,
+                                          std::optional<bool> topChordLeftHalf) {
+        const QString t = stripProfileSuffix(txt);
+        if (t.isEmpty() || t == QStringLiteral("—")) {
+            return;
+        }
+        QPointF sumMid(0.0, 0.0);
+        double sumDx = 0.0;
+        double sumDy = 0.0;
+        int nSeg = 0;
+        for (const auto &mm : result.members) {
+            if (!mm.isTruss || mm.trussRole != role) {
+                continue;
+            }
+            double xa = 0.0;
+            double ya = 0.0;
+            double xb = 0.0;
+            double yb = 0.0;
+            if (!nodeXY(mm.nodeI, xa, ya) || !nodeXY(mm.nodeJ, xb, yb)) {
+                continue;
+            }
+            const double mx = 0.5 * (xa + xb);
+            const double my = 0.5 * (ya + yb);
+            if (!useSegment(mx, my)) {
+                continue;
+            }
+            const QPointF pa = scenePoint(xa, ya, scale, originX, originY);
+            const QPointF pb = scenePoint(xb, yb, scale, originX, originY);
+            sumMid += (pa + pb) * 0.5;
+            sumDx += (pb.x() - pa.x());
+            sumDy += (pb.y() - pa.y());
+            ++nSeg;
+        }
+        if (nSeg <= 0) {
+            return;
+        }
+        QPointF pos = sumMid / static_cast<double>(nSeg);
+        const double len = std::hypot(sumDx, sumDy);
+        QPointF perp(0.0, 0.0);
+        if (len > 1e-6) {
+            perp = QPointF(-sumDy / len, sumDx / len);
+        }
+        /** Üst başlık sol/sağ: dik yönü dışarı (sola / sağa) çevir — tepe düğümünde çakışmayı azaltır. */
+        if (role == TrussMemberRole::ChordTop && topChordLeftHalf.has_value() && len > 1e-6) {
+            if (*topChordLeftHalf) {
+                if (perp.x() > 0.0) {
+                    perp = -perp;
+                }
+            } else {
+                if (perp.x() < 0.0) {
+                    perp = -perp;
+                }
+            }
+        } else if (role == TrussMemberRole::ChordBottom && len > 1e-6) {
+            /** Alt hat: etiketi çizginin “dışına” (genelde aşağı / örtüşmeden uzak). */
+            if (perp.y() < 0.0) {
+                perp = -perp;
+            }
+        }
+        pos += perp * kChordOffPx;
+        constexpr int kChordLabelPt = 10;
+        auto *ti = m_scene->addSimpleText(t, QFont(QStringLiteral("Segoe UI"), kChordLabelPt, QFont::DemiBold));
+        ti->setBrush(QColor(18, 18, 18));
+        const QRectF tb = ti->boundingRect();
+        ti->setTransformOriginPoint(tb.center());
+        ti->setPos(pos.x() - 0.5 * tb.width(), pos.y() - 0.5 * tb.height());
+        double deg = 0.0;
+        if (len > 1e-6) {
+            deg = std::atan2(sumDy, sumDx) * 180.0 / 3.14159265358979323846;
+            if (deg > 90.0) {
+                deg -= 180.0;
+            } else if (deg < -90.0) {
+                deg += 180.0;
+            }
+        }
+        ti->setRotation(deg);
+        ti->setZValue(6);
+    };
+
+    addChordGroupLabelFiltered(TrussMemberRole::ChordBottom, opt.trussBottomChord2xL,
+                               [](double, double) { return true; }, std::nullopt);
+    addChordGroupLabelFiltered(TrussMemberRole::ChordTop, opt.trussTopChord2xL,
+                               [ridgeX](double mx, double) { return mx < ridgeX; }, true);
+    addChordGroupLabelFiltered(TrussMemberRole::ChordTop, opt.trussTopChord2xL,
+                               [ridgeX](double mx, double) { return mx >= ridgeX; }, false);
 
     const double nodeR = std::max(2.0, scale * 0.08);
     for (const auto &n : result.nodes) {
@@ -339,83 +634,6 @@ void MainWindow::drawFrameFromResult(const PortalFrameResult &result, const Port
                     scenePoint(0.0, 0.55 * Hc, scale, originX, originY).y() - 8.0);
     windLbl->setZValue(4);
 
-    const QString cCol = stripProfileSuffix(opt.columnProfile);
-    const QString cBot = stripProfileSuffix(opt.trussBottomChord2xL);
-    const QString cTop = stripProfileSuffix(opt.trussTopChord2xL);
-    const QString cWB = stripProfileSuffix(opt.trussWebB2xL);
-    const QString cWC = stripProfileSuffix(opt.trussWebC2xL);
-    const QString cWD = stripProfileSuffix(opt.trussWebD2xL);
-
-    const QString html =
-        QStringLiteral("<div style='text-align:left'>"
-                       "<div style='font-weight:700;font-size:11pt;margin-bottom:6px'>Kesit (TS 498 STR zarf, TS EN "
-                       "1993-1-1)</div>"
-                       "<div style='font-size:9pt;line-height:1.45;color:#222'>"
-                       "<b>Renk — eleman</b><br/>"
-                       "<span style='color:#282828'>■</span> Kolon<br/>"
-                       "<span style='color:#1565c0'>■</span> Alt hat<br/>"
-                       "<span style='color:#00697d'>■</span> Uç gusset (kısa düşey, alt hat 2×L)<br/>"
-                       "<span style='color:#1b5e20'>■</span> Üst hat + köşegen w=0,1 (üst hat 2×L)<br/>"
-                       "<span style='color:#8e243e'>■</span> Köşegen B (w=2…7, 60×60×6’dan arama)<br/>"
-                       "<span style='color:#6a1b9a'>■</span> Köşegen C (w=8…15, 50×50×5’ten)<br/>"
-                       "<span style='color:#b45a1e'>■</span> Köşegen D (sondan bir önceki w)<br/>"
-                       "<span style='font-size:8pt;color:#555'>w: her j’de önce sol sonra sağ çapraz; toplam 2N çubuk.</span>"
-                       "</div>"
-                       "<div style='margin-top:8px;font-size:10pt;line-height:1.4'>"
-                       "<span style='color:#282828'>■</span> Kolon: %1 — η=%2 <span style='color:#666'>(%3)</span><br/>"
-                       "<span style='color:#1565c0'>■</span> Alt hat: %4 — η=%5 <span "
-                       "style='color:#666'>(%6)</span><br/>"
-                       "<span style='color:#1b5e20'>■</span> Üst hat: %7 — η=%8 <span "
-                       "style='color:#666'>(%9)</span><br/>"
-                       "<span style='color:#8e243e'>■</span> Köşegen B: %10 — η=%11 <span "
-                       "style='color:#666'>(%12)</span><br/>"
-                       "<span style='color:#6a1b9a'>■</span> Köşegen C: %13 — η=%14 <span "
-                       "style='color:#666'>(%15)</span><br/>"
-                       "<span style='color:#b45a1e'>■</span> Köşegen D: %16 — η=%17 <span "
-                       "style='color:#666'>(%18)</span>"
-                       "</div>"
-                       "<div style='margin-top:8px;font-size:9pt;color:#444'>%19</div>"
-                       "</div>")
-            .arg(cCol)
-            .arg(opt.columnUtilization, 0, 'f', 2)
-            .arg(opt.governingColumnCombinationId.isEmpty() ? QStringLiteral("—")
-                                                             : opt.governingColumnCombinationId)
-            .arg(cBot)
-            .arg(opt.trussBottomChordUtilization, 0, 'f', 2)
-            .arg(opt.governingTrussBottomCombinationId.isEmpty() ? QStringLiteral("—")
-                                                                   : opt.governingTrussBottomCombinationId)
-            .arg(cTop)
-            .arg(opt.trussTopChordUtilization, 0, 'f', 2)
-            .arg(opt.governingTrussTopCombinationId.isEmpty() ? QStringLiteral("—") : opt.governingTrussTopCombinationId)
-            .arg(cWB)
-            .arg(opt.trussWebBUtilization, 0, 'f', 2)
-            .arg(opt.governingTrussWebBCombinationId.isEmpty() ? QStringLiteral("—")
-                                                                  : opt.governingTrussWebBCombinationId)
-            .arg(cWC)
-            .arg(opt.trussWebCUtilization, 0, 'f', 2)
-            .arg(opt.governingTrussWebCCombinationId.isEmpty() ? QStringLiteral("—")
-                                                                   : opt.governingTrussWebCCombinationId)
-            .arg(cWD)
-            .arg(opt.trussWebDUtilization, 0, 'f', 2)
-            .arg(opt.governingTrussWebDCombinationId.isEmpty() ? QStringLiteral("—")
-                                                                   : opt.governingTrussWebDCombinationId)
-            .arg(opt.envelopeNote.isEmpty() ? QStringLiteral("Önizleme: üst sınır q,w ile el hesap.")
-                                             : opt.envelopeNote);
-
-    auto *info = m_scene->addText(QString());
-    info->setHtml(html);
-    info->setDefaultTextColor(QColor(25, 25, 25));
-    info->setTextWidth(380.0);
-    const QRectF br = info->boundingRect();
-    const QRect vrLegend = ui->graphicsView->viewport()->rect();
-    const int margin = 10;
-    const QPointF topRightScene = ui->graphicsView->mapToScene(QPoint(vrLegend.width() - margin, margin));
-    info->setPos(topRightScene.x() - br.width(), topRightScene.y());
-    const QRectF frame = br.translated(info->pos()).adjusted(-10, -8, 10, 8);
-    auto *bg = m_scene->addRect(frame, QPen(QColor(160, 160, 170), 1.0), QBrush(QColor(255, 255, 255, 228)));
-    bg->setZValue(9);
-    info->setZValue(10);
-
     m_scene->setSceneRect(m_scene->itemsBoundingRect().adjusted(-10, -10, 10, 10));
 }
 
@@ -425,7 +643,8 @@ void MainWindow::onCalculateClicked()
         return;
     }
 
-    ui->label_status->setText(tr("Running analysis…"));
+    ui->label_status->setText(tr("Analiz çalışıyor…"));
+    ui->text_result_opensees->setPlainText(tr("…"));
     ui->push_calculate->setEnabled(false);
     m_busy = true;
 
@@ -444,12 +663,14 @@ void MainWindow::onAnalysisFinished()
 
     const PortalFrameResult r = m_watcher.future().result();
     if (!r.ok) {
-        ui->label_status->setText(tr("Error: %1").arg(r.errorMessage));
+        ui->text_result_opensees->setPlainText(r.errorMessage);
+        ui->label_status->setText(tr("Hata — ayrıntı altta OpenSees alanında."));
         QMessageBox::warning(this, tr("Analysis"), r.errorMessage);
         return;
     }
 
-    ui->label_status->setText(r.errorMessage);
+    ui->text_result_opensees->setPlainText(r.errorMessage);
+    ui->label_status->setText(tr("Tamam — OpenSees özeti altta."));
     drawFrameFromResult(r, collectInput());
 }
 

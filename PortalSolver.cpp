@@ -1,5 +1,7 @@
 #include "PortalSolver.h"
+#include "Buckling.h"
 #include "OpenSeesRunner.h"
+#include "LectureTrussSolver.h"
 #include "SteelCatalog.h"
 #include "TurkishLoads.h"
 
@@ -93,6 +95,69 @@ bool PortalSolver::validate(const PortalFrameInput &in, QString *err) const
         }
         return false;
     }
+    if (static_cast<int>(in.columnBaseSupport) < 0 || static_cast<int>(in.columnBaseSupport) > 1) {
+        if (err) {
+            *err = QStringLiteral("Column base support must be fixed (0) or pinned (1).");
+        }
+        return false;
+    }
+    if (in.columnBucklingKy <= 0.05 || in.columnBucklingKy > 20.0) {
+        if (err) {
+            *err = QStringLiteral("Column buckling Ky must be in (0.05, 20].");
+        }
+        return false;
+    }
+    if (in.columnBucklingKz <= 0.05 || in.columnBucklingKz > 20.0) {
+        if (err) {
+            *err = QStringLiteral("Column buckling Kz must be in (0.05, 20].");
+        }
+        return false;
+    }
+    if (in.columnBucklingCurveOrdinal < 0 || in.columnBucklingCurveOrdinal > 4 || in.trussBucklingCurveOrdinal < 0
+        || in.trussBucklingCurveOrdinal > 4) {
+        if (err) {
+            *err = QStringLiteral("Buckling imperfection curve ordinal must be 0…4 (A0…D).");
+        }
+        return false;
+    }
+    for (double f : in.columnLateralBraceHeightFractions) {
+        if (f <= 1e-6 || f >= 1.0 - 1e-6) {
+            if (err) {
+                *err = QStringLiteral("Column lateral brace height fractions must be strictly between 0 and 1.");
+            }
+            return false;
+        }
+    }
+    for (double f : in.columnZzBucklingBraceHeightFractions) {
+        if (f <= 1e-6 || f >= 1.0 - 1e-6) {
+            if (err) {
+                *err = QStringLiteral("Column z-z buckling brace height fractions must be strictly between 0 and 1.");
+            }
+            return false;
+        }
+    }
+    for (double f : in.columnLtbBottomFlangeBraceHeightFractions) {
+        if (f <= 1e-6 || f >= 1.0 - 1e-6) {
+            if (err) {
+                *err = QStringLiteral("Column LTB bottom-flange brace height fractions must be strictly between 0 and 1.");
+            }
+            return false;
+        }
+    }
+    for (double f : in.columnLtbTopFlangeBraceHeightFractions) {
+        if (f <= 1e-6 || f >= 1.0 - 1e-6) {
+            if (err) {
+                *err = QStringLiteral("Column LTB top-flange brace height fractions must be strictly between 0 and 1.");
+            }
+            return false;
+        }
+    }
+    if (in.columnLtbCurveOrdinal < 0 || in.columnLtbCurveOrdinal > 4) {
+        if (err) {
+            *err = QStringLiteral("Column LTB curve ordinal must be 0…4 (A0…D).");
+        }
+        return false;
+    }
     return true;
 }
 
@@ -161,6 +226,8 @@ PortalFrameResult PortalSolver::analyze(const PortalFrameInput &input) const
               .arg(out.sectionDesign.envelopeNote)
               .arg(out.sectionDesign.columnProfile)
               .arg(out.sectionDesign.trussProfile2xL);
+    out.lectureTrussComparisonNote += LectureTrussSolver::formatTrussSectionsCompareBlock(&pass1Design,
+                                                                                          &out.sectionDesign);
     return out;
 }
 
@@ -240,13 +307,20 @@ void PortalSolver::buildPortalGeometry(const PortalFrameInput &input, PortalFram
     }
     topRight.push_back(idApex);
 
-    /** Yalnızca sol/sağ alt köşede kısa düşey gusset — ilk çaprazı statik olarak rahatlatmak için (şema ucu). */
+    /**
+     * Köşe gusset: kolon üzerinde alt hattan Δy aşağıda başlar, alt başlık hattında Δx içeri 45° çapraz ile köşeye bağlanır
+     * (Δx = Δy = min(1 m, ilk alt hat panel yarı genişliği − tolerans)).
+     */
     const double yBotCorner = Hc - hEdge;
-    const double stubDrop =
-        std::clamp(W / 120.0, 0.03, std::max(0.02, std::min(0.12 * Hc, yBotCorner - 0.02)));
-    const double yGusEnd = std::max(yBotCorner - stubDrop, 1e-3);
-    const int idLeftGusEnd = addNode(0.0, yGusEnd);
-    const int idRightGusEnd = addNode(W, yGusEnd);
+    const double firstBottomHalfWidth = (N >= 1) ? (0.5 * W / static_cast<double>(N)) : (0.5 * W);
+    constexpr double kGussetLegPreferred_m = 1.0;
+    const double leg =
+        std::clamp(kGussetLegPreferred_m, 0.05, std::max(0.05, firstBottomHalfWidth - 0.02));
+    const double yGusCol = yBotCorner - leg;
+    const int idLeftGusCol = addNode(0.0, std::max(yGusCol, 1e-3));
+    const int idLeftGusTip = addNode(leg, yBotCorner);
+    const int idRightGusCol = addNode(W, std::max(yGusCol, 1e-3));
+    const int idRightGusTip = addNode(W - leg, yBotCorner);
 
     auto addMember = [&](int i, int j, bool truss, bool roofLine, TrussMemberRole role, uint8_t tcLbl = 0,
                          bool tcLeft = true, uint8_t webOptZone = 0) {
@@ -283,9 +357,9 @@ void PortalSolver::buildPortalGeometry(const PortalFrameInput &input, PortalFram
                   TrussMemberRole::ChordTop, lbl, false);
     }
 
-    if (stubDrop > 1e-6 && yGusEnd + 1e-9 < yBotCorner) {
-        addMember(idLeftBottom, idLeftGusEnd, true, false, TrussMemberRole::GussetStrip);
-        addMember(idRightBottom, idRightGusEnd, true, false, TrussMemberRole::GussetStrip);
+    if (leg > 1e-6 && yGusCol > 1e-6 && yGusCol + 1e-9 < yBotCorner) {
+        addMember(idLeftGusCol, idLeftGusTip, true, false, TrussMemberRole::GussetStrip);
+        addMember(idRightGusCol, idRightGusTip, true, false, TrussMemberRole::GussetStrip);
     }
 
     const int wtot = 2 * N;
@@ -306,6 +380,94 @@ void PortalSolver::buildPortalGeometry(const PortalFrameInput &input, PortalFram
                       TrussMemberRole::Web, 0, true, zR);
         }
     }
+}
+
+std::vector<double> PortalSolver::columnTrussDerivedBraceHeightFractions(const PortalFrameInput &input)
+{
+    const double W = input.spanWidth_m;
+    const double Hc = input.columnHeight_m;
+    std::vector<double> out;
+    if (Hc < 1e-9 || W < 1e-9) {
+        return out;
+    }
+    const double hEdge = W / 40.0;
+    const double yBotCorner = Hc - hEdge;
+    const double fBottom = yBotCorner / Hc;
+    if (fBottom > 1e-6 && fBottom < 1.0 - 1e-6) {
+        out.push_back(fBottom);
+    }
+    const int N = input.trussPanelsPerSide;
+    const double firstBottomHalfWidth = (N >= 1) ? (0.5 * W / static_cast<double>(N)) : (0.5 * W);
+    constexpr double kGussetLegPreferred_m = 1.0;
+    const double leg =
+        std::clamp(kGussetLegPreferred_m, 0.05, std::max(0.05, firstBottomHalfWidth - 0.02));
+    const double yGusCol = yBotCorner - leg;
+    if (leg > 1e-6 && yGusCol > 1e-6 && yGusCol + 1e-9 < yBotCorner) {
+        const double fGus = yGusCol / Hc;
+        if (fGus > 1e-6 && fGus < 1.0 - 1e-6 && std::abs(fGus - fBottom) > 1e-9) {
+            out.push_back(fGus);
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+std::vector<double> PortalSolver::columnLateralBraceHeightFractionsEffective(const PortalFrameInput &input)
+{
+    std::vector<double> fr = input.columnLateralBraceHeightFractions;
+    if (input.columnLateralBraceFromTrussGeometry) {
+        const std::vector<double> geo = columnTrussDerivedBraceHeightFractions(input);
+        for (const double g : geo) {
+            fr.push_back(g);
+        }
+    }
+    fr.erase(std::remove_if(fr.begin(), fr.end(),
+                            [](double x) { return x <= 1e-6 || x >= 1.0 - 1e-6; }),
+             fr.end());
+    std::sort(fr.begin(), fr.end());
+    fr.erase(std::unique(fr.begin(), fr.end()), fr.end());
+    return fr;
+}
+
+double PortalSolver::columnElasticCriticalForceZz_N(double E_Pa, double Iz_m4, const PortalFrameInput &input)
+{
+    const double H = input.columnHeight_m;
+    if (H < 1e-12 || Iz_m4 < 1e-24) {
+        return std::numeric_limits<double>::max();
+    }
+    std::vector<double> fr;
+    if (!input.columnZzBucklingBraceHeightFractions.empty()) {
+        fr = input.columnZzBucklingBraceHeightFractions;
+        fr.erase(std::remove_if(fr.begin(), fr.end(),
+                                [](double x) { return x <= 1e-6 || x >= 1.0 - 1e-6; }),
+                 fr.end());
+        std::sort(fr.begin(), fr.end());
+        fr.erase(std::unique(fr.begin(), fr.end()), fr.end());
+    } else {
+        fr = columnLateralBraceHeightFractionsEffective(input);
+    }
+    if (fr.empty()) {
+        return Ec3Buckling::eulerAxialCriticalForce_N(E_Pa, Iz_m4, input.columnBucklingKz, H);
+    }
+    std::vector<double> pts;
+    pts.push_back(0.0);
+    for (const double f : fr) {
+        pts.push_back(f);
+    }
+    pts.push_back(1.0);
+    double ncrMin = std::numeric_limits<double>::max();
+    for (size_t i = 0; i + 1 < pts.size(); ++i) {
+        const double L = (pts[i + 1] - pts[i]) * H;
+        if (L < 1e-9) {
+            continue;
+        }
+        ncrMin = std::min(ncrMin, Ec3Buckling::eulerAxialCriticalForce_N(E_Pa, Iz_m4, 1.0, L));
+    }
+    if (ncrMin >= std::numeric_limits<double>::max() / 2.0) {
+        return Ec3Buckling::eulerAxialCriticalForce_N(E_Pa, Iz_m4, input.columnBucklingKz, H);
+    }
+    return ncrMin;
 }
 
 double PortalSolver::trussSelfWeightHoriz_kN_per_m2(const PortalFrameInput &input)

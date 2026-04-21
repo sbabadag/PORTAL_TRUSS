@@ -8,6 +8,13 @@
 #include "SectionOptimizer.h"
 #include "TurkishLoads.h"
 
+/** Kolon tabanı: OpenSees’te düğüm rz tutuluğu (ankastre) veya serbest (mafsallı). */
+enum class ColumnBaseSupport : int
+{
+    Fixed = 0,
+    Pinned = 1
+};
+
 /**
  * Input for a symmetric steel portal frame with A-truss rafters.
  * Geometry: m; E Pa; I m⁴; A m².
@@ -37,6 +44,49 @@ struct PortalFrameInput
     /** Rüzgar eşdeğeri — kN/m² kolon yüzeyine; hat yükü × aks aralığı. */
     double wl_kN_per_m2{0.16};
 
+    /**
+     * Kolon eksenel burkulma (basit Euler + χ): y-y için effektif boy katsayısı Ky (genelde salınım ~2).
+     * Şartname / bağlantı ile doğrulayın.
+     */
+    double columnBucklingKy{2.0};
+    /**
+     * z-z burkulma: tutuluş yokken Kz (varsayılan 2); ara yanal tutuluş verilirse segmentlerde K≈1 kullanılır.
+     */
+    double columnBucklingKz{2.0};
+    /** Kolon eksenel χ imperfection: 0=A0, 1=A, 2=B, 3=C, 4=D (EN 1993-1-1 Tablo 6.1). */
+    int columnBucklingCurveOrdinal{2};
+    /** Makas 2×L eksenel χ için aynı kodlama. */
+    int trussBucklingCurveOrdinal{2};
+    /**
+     * Tabandan kolon boyuna oran (0,1) içinde yanal tutuluş yükseklikleri; virgülle ayrılmış girişten doldurulur.
+     * `columnZzBucklingBraceHeightFractions` boşsa z-z Euler segmentleri bununla (+ isteğe bağlı makas türetilmiş) birleştirilir.
+     */
+    std::vector<double> columnLateralBraceHeightFractions;
+    /**
+     * Z-z eksenel burkulma (Euler Iz) için tutuluş kesitleri — yalnızca bu oranlar kullanılır; elle/makas listesi ile karıştırılmaz.
+     * Boşsa `columnLateralBraceHeightFractions` + `columnLateralBraceFromTrussGeometry` etkisi devam eder.
+     */
+    std::vector<double> columnZzBucklingBraceHeightFractions;
+    /**
+     * true: z-z burkulmada `columnTrussDerivedBraceHeightFractions` ile makas alt hattı (+ varsa 45° köşe gusset) kolon
+     * düğüm yükseklikleri otomatik eklenir (elle girilen oranlarla birleştirilir). Üst hat bu şemada kolona
+     * yalnızca mahyada (y=Hc) bağlanır — uç sınır; ara h/H olarak eklenmez.
+     */
+    bool columnLateralBraceFromTrussGeometry{true};
+
+    /**
+     * LTB: alt başlık (compression flange tarafı) yanal tutuluş h/H — segment bazlı Mcr, χ_LT.
+     * İki flanş listesi de boşsa LTB uygulanmaz.
+     */
+    std::vector<double> columnLtbBottomFlangeBraceHeightFractions;
+    /** LTB: üst başlık yanal tutuluş h/H. Her iki flanş da doluysa Mcr = min(Mcr,alt, Mcr,üst) (muhafazakâr). */
+    std::vector<double> columnLtbTopFlangeBraceHeightFractions;
+    /** LTB imperfection curve ordinal: 0…4 = A0…D (EN 1993-1-1 Tablo 6.3 için pratik eşleme; varsayılan B). */
+    int columnLtbCurveOrdinal{2};
+
+    /** Kolon ayak mesneti — statik model (OpenSees) ve el kolon momenti kabulleri. */
+    ColumnBaseSupport columnBaseSupport{ColumnBaseSupport::Fixed};
+
     /** 0 = HEA, 1 = HEB, 2 = IPE (kolon için en hafif uygun profil seçilir). */
     int columnFamilyIndex{0};
     /** Çelik akma dayanımı (S235 → 235 MPa). */
@@ -63,7 +113,7 @@ enum class TrussMemberRole : uint8_t
     ChordTop,
     EdgePost,
     Web,
-    /** Sol/sağ uçta kısa düşey gusset (alt hat köşesinden aşağı; kesit alt hat 2×L ile aynı grup). */
+    /** Sol/sağ uçta 45° köşe gusset (kolon üzerinde alt hattan aşağı → alt başlık köşesine; kesit alt hat 2×L ile aynı grup). */
     GussetStrip
 };
 
@@ -100,6 +150,9 @@ struct PortalFrameResult
     std::vector<MemberResult> members;
 
     SectionOptimizationResult sectionDesign;
+
+    /** OpenSees sonrası: pin-eksen makas modeli ile makas eksenel kuvvet farkı özeti (boş olabilir). */
+    QString lectureTrussComparisonNote;
 };
 
 Q_DECLARE_METATYPE(PortalFrameResult)
@@ -122,9 +175,21 @@ public:
     /** Fills nodes/members for visualization and for mirroring OpenSees connectivity. */
     static void buildPortalGeometry(const PortalFrameInput &input, PortalFrameResult &out);
 
+    /**
+     * Kolon z-z burkulması için makas geometrisinden h/H oranları — `buildPortalGeometry` ile uyumlu.
+     * Alt hat köşesi y = Hc − W/40; gusset varsa kolon üzerindeki alt uç y (45° bacak, tercihen 1 m).
+     */
+    static std::vector<double> columnTrussDerivedBraceHeightFractions(const PortalFrameInput &input);
+
+    /** Elle girilen + (isteğe bağlı) makastan türetilen tutuluş oranlarının birleşimi (sıralı, tekil). */
+    static std::vector<double> columnLateralBraceHeightFractionsEffective(const PortalFrameInput &input);
+
+    /** z-z Euler kritik kuvvet Ncr [N] — `columnLateralBraceHeightFractionsEffective` ile segmentli veya Kz·H. */
+    static double columnElasticCriticalForceZz_N(double E_Pa, double Iz_m4, const PortalFrameInput &input);
+
     /** Makas çubukları toplam çelik hacmi → yatay izdüşüm m² başına kN/m² (γ≈77 kN/m³). */
     static double trussSelfWeightHoriz_kN_per_m2(const PortalFrameInput &input);
 
-private:
+    /** Giriş tutarlılığı (analyze / self-check öncesi). */
     bool validate(const PortalFrameInput &in, QString *err) const;
 };

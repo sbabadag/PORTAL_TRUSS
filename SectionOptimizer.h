@@ -61,3 +61,10 @@ SectionOptimizationResult optimizeSectionsEnvelope(const PortalFrameInput &input
                                                    const std::vector<PortalFrameResult> &comboResults,
                                                    const std::vector<TurkishLoads::StrCombination> &combos,
                                                    double fy_MPa, ColumnFamily colFamily);
+
+/**
+ * Varsayılan PortalFrameInput ile türetilmiş hat yükleri, STR kombinasyon cebirleri,
+ * el kolon momenti (wd·Hc²/2), kolon χ/Wy dayanımı (2B düzlem eğilmesi) ve (OpenSees varsa) taban moment üst sınırı.
+ * Başarı: "OK" ile başlar; aksi "FAIL:". --self-check ile main’den çalıştırılabilir.
+ */
+QString runPortalSelfCheckDefaultInput();

@@ -1,36 +1,118 @@
 #include "SectionOptimizer.h"
 
+#include "Buckling.h"
+#include "OpenSeesRunner.h"
 #include "PortalSolver.h"
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <vector>
+
+#include <QStringList>
 
 namespace {
 
-constexpr double kPi = 3.14159265358979323846;
 constexpr double kGammaM0 = 1.0;
 constexpr double kGammaM1 = 1.0;
 /** Makas çubuğu (2×L): ideal pimli düğümler — esnek burkulmada L_cr = K·L, K = 1,0 (çubuk boyu düğüm arası). */
 constexpr double kTrussMemberBucklingK = 1.0;
 
-double eulerNcr(double E_Pa, double Iz_m4, double K, double L_m)
+double ltbCriticalMomentMcr_Nm(double E_Pa, double G_Pa, double Iz_m4, double It_m4, double Iw_m6, double Lb_m)
 {
-    const double kl = K * L_m;
-    return kPi * kPi * E_Pa * Iz_m4 / std::max(kl * kl, 1e-18);
+    // Doubly symmetric I, simplified Mcr (EC3 Annex F-style). Conservative: C1 = 1.0.
+    if (E_Pa <= 0.0 || G_Pa <= 0.0 || Iz_m4 < 1e-24 || Lb_m < 1e-9) {
+        return 0.0;
+    }
+    if (It_m4 <= 1e-28 && Iw_m6 <= 1e-35) {
+        return 0.0;
+    }
+    constexpr double pi = 3.14159265358979323846;
+    const double k = (pi * pi) * E_Pa * Iz_m4 / (Lb_m * Lb_m); // [N]
+    const double a = std::max(Iw_m6, 0.0) / std::max(Iz_m4, 1e-24); // [m^2]
+    const double b = (Lb_m * Lb_m) * G_Pa * std::max(It_m4, 0.0) / std::max((pi * pi) * E_Pa * Iz_m4, 1e-18); // [m^2]
+    const double s = std::sqrt(std::max(a + b, 0.0)); // [m]
+    return k * s; // [N·m]
 }
 
-/** TS EN 1993-1-1 6.3.1.2 — eğri b (α=0,34). */
-double chiBuckling(double lambdaBar, double alpha)
+double columnMcrMinFromBraceHeights_Nm(const std::vector<double> &braceFractions, double H, double E_Pa, double G_Pa,
+                                      const RolledISection &sec)
 {
-    if (lambdaBar <= 1e-9) {
-        return 1.0;
+    if (H < 1e-9) {
+        return 0.0;
     }
-    const double phi = 0.5 * (1.0 + alpha * (lambdaBar - 0.2) + lambdaBar * lambdaBar);
-    const double r = phi * phi - lambdaBar * lambdaBar;
-    const double den = phi + std::sqrt(std::max(r, 1e-18));
-    return std::min(1.0 / den, 1.0);
+    std::vector<double> pts;
+    pts.reserve(braceFractions.size() + 2);
+    pts.push_back(0.0);
+    for (double f : braceFractions) {
+        if (f > 1e-6 && f < 1.0 - 1e-6) {
+            pts.push_back(f);
+        }
+    }
+    pts.push_back(1.0);
+    std::sort(pts.begin(), pts.end());
+    pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
+
+    double mcrMin = 0.0;
+    for (size_t i = 0; i + 1 < pts.size(); ++i) {
+        const double Lb = (pts[i + 1] - pts[i]) * H;
+        if (Lb < 1e-6) {
+            continue;
+        }
+        const double mcr = ltbCriticalMomentMcr_Nm(E_Pa, G_Pa, sec.Iz_m4, sec.It_m4, sec.Iw_m6, Lb);
+        if (mcr <= 0.0) {
+            continue;
+        }
+        mcrMin = (mcrMin <= 0.0) ? mcr : std::min(mcrMin, mcr);
+    }
+    if (mcrMin > 0.0) {
+        return mcrMin;
+    }
+    return ltbCriticalMomentMcr_Nm(E_Pa, G_Pa, sec.Iz_m4, sec.It_m4, sec.Iw_m6, H);
+}
+
+/** Alt / üst başlık tutuluşları ayrı; her iki flanş da doluysa en küçük Mcr (muhafazakâr). */
+double columnMcrLtbFromFlanges_Nm(const PortalFrameInput &in, const RolledISection &sec, double E_Pa)
+{
+    const double H = in.columnHeight_m;
+    if (H < 1e-9) {
+        return 0.0;
+    }
+    const double nu = 0.3;
+    const double G = E_Pa / (2.0 * (1.0 + nu));
+    const bool hasB = !in.columnLtbBottomFlangeBraceHeightFractions.empty();
+    const bool hasT = !in.columnLtbTopFlangeBraceHeightFractions.empty();
+    if (!hasB && !hasT) {
+        return 0.0;
+    }
+    if (hasB && hasT) {
+        const double mb =
+            columnMcrMinFromBraceHeights_Nm(in.columnLtbBottomFlangeBraceHeightFractions, H, E_Pa, G, sec);
+        const double mt =
+            columnMcrMinFromBraceHeights_Nm(in.columnLtbTopFlangeBraceHeightFractions, H, E_Pa, G, sec);
+        return std::min(mb, mt);
+    }
+    if (hasB) {
+        return columnMcrMinFromBraceHeights_Nm(in.columnLtbBottomFlangeBraceHeightFractions, H, E_Pa, G, sec);
+    }
+    return columnMcrMinFromBraceHeights_Nm(in.columnLtbTopFlangeBraceHeightFractions, H, E_Pa, G, sec);
+}
+
+/** y-y burkulma: tek boy Ky·H (ara tutuluş listesi z-z için). */
+static double ncrYColumnEuler(const PortalFrameInput &in, double E_Pa, double Iy_m4)
+{
+    const double H = in.columnHeight_m;
+    if (H < 1e-12) {
+        return std::numeric_limits<double>::max();
+    }
+    return Ec3Buckling::eulerAxialCriticalForce_N(E_Pa, Iy_m4, in.columnBucklingKy, H);
+}
+
+/** z-z burkulma: `PortalSolver::columnElasticCriticalForceZz_N` ile aynı. */
+static double ncrZColumnEuler(const PortalFrameInput &in, double E_Pa, double Iz_m4)
+{
+    return PortalSolver::columnElasticCriticalForceZz_N(E_Pa, Iz_m4, in);
 }
 
 double memberLength(const PortalFrameResult &r, int ti, int tj)
@@ -60,13 +142,18 @@ double memberLength(const PortalFrameResult &r, int ti, int tj)
 }
 
 /**
- * Portal kolon: TS EN 1993-1-1 elastik burkulma, eğri b.
- * - Etkili boy: K≈2 (çerçeve sallanması / makas bağlantısı — konservatif).
- * - Ncr = min(Ncr,y, Ncr,z); eksenel dayanım |N|/(χAfy) — OpenSees işaret karışırsa da güvenli.
+ * Portal kolon: TS EN 1993-1-1 elastik burkulma + χ (giriş imperfection eğrisi).
+ * - Ncr = min(Ncr,y, Ncr,z, Ncr,T); Ncr,T: çift simetrik I, It/Iw katalogdan (burulmalı–eğilme).
+ * - Sınıf 4: EN 1993-1-5 etkin alan; λ̄ ve Nb,Rd’de Aeff; çekmede Npl brüt A.
+ * - 2B çerçeve düzleminde eğilme: kolon web’i düzlemde → OpenSees M, y-y güçlü eksen (Wy); z-z (Wz) değil.
  */
 double columnUtilEC3(double N_N, double M_Nm, const RolledISection &sec, double fy_Pa, double E_Pa,
-                     double columnHeight_m)
+                     const PortalFrameInput &in)
 {
+    const Ec3Buckling::ImperfectionCurve flexCurve =
+        Ec3Buckling::imperfectionCurveFromOrdinal(in.columnBucklingCurveOrdinal);
+    const Ec3Buckling::ImperfectionCurve ltbCurve =
+        Ec3Buckling::imperfectionCurveFromOrdinal(in.columnLtbCurveOrdinal);
     const double A = sec.A_m2;
     const double Wy = sec.Wy_m3;
     const double Iy = sec.Iy_m4;
@@ -74,18 +161,77 @@ double columnUtilEC3(double N_N, double M_Nm, const RolledISection &sec, double 
     if (A < 1e-18 || Wy < 1e-18 || Iy < 1e-18 || Iz < 1e-18) {
         return 1e9;
     }
-    const double MRd = Wy * fy_Pa / kGammaM0;
     const double Nabs = std::abs(N_N);
     const double Mabs = std::abs(M_Nm);
 
-    constexpr double K_portal = 2.0;
-    const double Ncry = eulerNcr(E_Pa, Iy, K_portal, columnHeight_m);
-    const double Ncrz = eulerNcr(E_Pa, Iz, K_portal, columnHeight_m);
-    const double Ncr = std::min(Ncry, Ncrz);
-    const double lambdaBar = std::sqrt(A * fy_Pa / std::max(Ncr, 1e-12));
-    const double chi = chiBuckling(lambdaBar, 0.34);
-    const double NRd = chi * A * fy_Pa / kGammaM1;
-    return Nabs / std::max(NRd, 1e-9) + Mabs / std::max(MRd, 1e-9);
+    const double Ncry = ncrYColumnEuler(in, E_Pa, Iy);
+    const double Ncrz = ncrZColumnEuler(in, E_Pa, Iz);
+    double NcrT = std::numeric_limits<double>::infinity();
+    if (sec.It_m4 > 1e-28 && sec.Iw_m6 > 1e-35 && E_Pa > 0.0) {
+        const double nu = 0.3;
+        const double G = E_Pa / (2.0 * (1.0 + nu));
+        const double H = in.columnHeight_m;
+        NcrT = Ec3Buckling::eulerTorsionalFlexuralCriticalForce_N(E_Pa, G, Iy, Iz, sec.It_m4, sec.Iw_m6,
+                                                                  in.columnBucklingKz, H, A);
+    }
+    const double Ncr = std::min({Ncry, Ncrz, NcrT});
+
+    double cf_mm = 0.0;
+    double cw_mm = 0.0;
+    bool geomOk = sec.h_mm > 1.0 && sec.b_mm > 1.0 && sec.tw_mm > 0.0 && sec.tf_mm > 0.0;
+    if (geomOk) {
+        const double rmm = (sec.r_mm > 0.5) ? sec.r_mm : std::max(1.5 * sec.tw_mm, 8.0);
+        cf_mm = 0.5 * (sec.b_mm - sec.tw_mm - 2.0 * rmm);
+        cw_mm = sec.h_mm - 2.0 * sec.tf_mm - 2.0 * rmm;
+        geomOk = (cf_mm > 0.0 && cw_mm > 0.0);
+    }
+    double psiWeb = 1.0;
+    if (geomOk) {
+        const double s1 = N_N / A + M_Nm / Wy;
+        const double s2 = N_N / A - M_Nm / Wy;
+        const double sigMax = std::max(s1, s2);
+        const double sigMin = std::min(s1, s2);
+        if (sigMax > 1e-12) {
+            psiWeb = std::clamp(sigMin / sigMax, -1.0, 1.0);
+        }
+    }
+    Ec3Buckling::CrossSectionClass clsFl = Ec3Buckling::CrossSectionClass::Unknown;
+    Ec3Buckling::CrossSectionClass clsW = Ec3Buckling::CrossSectionClass::Unknown;
+    if (geomOk) {
+        const double fyMPa = fy_Pa * 1e-6;
+        clsFl = Ec3Buckling::classifyOutstandFlangeCompressionRolled(fyMPa, cf_mm, sec.tf_mm);
+        clsW = Ec3Buckling::classifyInternalWebCompression(fyMPa, cw_mm, sec.tw_mm, psiWeb);
+    }
+    double Aeff = A;
+    double WyEff = Wy;
+    if (geomOk && clsFl != Ec3Buckling::CrossSectionClass::Unknown
+        && clsW != Ec3Buckling::CrossSectionClass::Unknown
+        && (clsFl == Ec3Buckling::CrossSectionClass::Class4 || clsW == Ec3Buckling::CrossSectionClass::Class4)) {
+        Aeff = Ec3Buckling::effectiveAreaDoublySymmetricI_m2(A, fy_Pa * 1e-6, clsFl, clsW, cf_mm, sec.tf_mm, cw_mm,
+                                                            sec.tw_mm, psiWeb);
+        WyEff = Wy * (Aeff / A);
+    }
+    const double Achi = (Aeff < A - 1e-12 * A) ? Aeff : A;
+    const double lambdaBar = Ec3Buckling::lambdaBarFlexuralCompression(Achi, fy_Pa, Ncr);
+    const double chi = Ec3Buckling::chiFlexuralBuckling(lambdaBar, flexCurve);
+    const double MRd = WyEff * fy_Pa / kGammaM0;
+    double MRd_bend = MRd;
+    {
+        // LTB only when user provides at least one flange brace list.
+        if (!in.columnLtbBottomFlangeBraceHeightFractions.empty()
+            || !in.columnLtbTopFlangeBraceHeightFractions.empty()) {
+            const double Mcr = columnMcrLtbFromFlanges_Nm(in, sec, E_Pa);
+            if (Mcr > 1e-6 && MRd > 1e-12 && WyEff > 1e-18 && std::abs(M_Nm) > 1e-6) {
+                const double lambdaLT = Ec3Buckling::lambdaBarLateralTorsional(WyEff, fy_Pa, Mcr);
+                const double chiLT = Ec3Buckling::chiLateralTorsionalBuckling(lambdaLT, ltbCurve);
+                MRd_bend = std::max(chiLT * MRd, 1e-9);
+            }
+        }
+    }
+    /** OpenSees yerel eksen: N≥0 çekme, N<0 basınç. */
+    const double NRd_axial = (N_N >= 0.0) ? Ec3Buckling::plasticAxialResistance_N(A, fy_Pa, kGammaM0)
+                                         : Ec3Buckling::axialBucklingResistance_N(chi, Aeff, fy_Pa, kGammaM1);
+    return Nabs / std::max(NRd_axial, 1e-9) + Mabs / std::max(MRd_bend, 1e-9);
 }
 
 /**
@@ -94,7 +240,7 @@ double columnUtilEC3(double N_N, double M_Nm, const RolledISection &sec, double 
  * i: bileşik sırt sırta açı çifti (SteelCatalog). L: düğüm çalışma noktaları arası; K = 1 (pim–pim).
  */
 double trussMemberUtilEC3(double N_N, double L_m, const DoubleAngleSection &da, double fy_Pa, double E_Pa,
-                          double bucklingK = kTrussMemberBucklingK)
+                          Ec3Buckling::ImperfectionCurve flexCurve, double bucklingK = kTrussMemberBucklingK)
 {
     const double A = da.A_total_m2;
     if (A < 1e-18 || L_m < 1e-9) {
@@ -102,16 +248,16 @@ double trussMemberUtilEC3(double N_N, double L_m, const DoubleAngleSection &da, 
     }
     const double i = std::max(da.i_buckling_m > 0.0 ? da.i_buckling_m : da.i_min_m, 1e-6);
     const double I = A * i * i;
-    const double Npl = A * fy_Pa / kGammaM0;
+    const double Npl = Ec3Buckling::plasticAxialResistance_N(A, fy_Pa, kGammaM0);
     const double Nabs = std::abs(N_N);
 
     if (N_N >= 0.0) {
         return Nabs / std::max(Npl, 1e-9);
     }
-    const double Ncr = eulerNcr(E_Pa, I, bucklingK, L_m);
-    const double lambdaBar = std::sqrt(A * fy_Pa / std::max(Ncr, 1e-12));
-    const double chi = chiBuckling(lambdaBar, 0.34);
-    const double NRd = chi * A * fy_Pa / kGammaM1;
+    const double Ncr = Ec3Buckling::eulerAxialCriticalForce_N(E_Pa, I, bucklingK, L_m);
+    const double lambdaBar = Ec3Buckling::lambdaBarFlexuralCompression(A, fy_Pa, Ncr);
+    const double chi = Ec3Buckling::chiFlexuralBuckling(lambdaBar, flexCurve);
+    const double NRd = Ec3Buckling::axialBucklingResistance_N(chi, A, fy_Pa, kGammaM1);
     return Nabs / std::max(NRd, 1e-9);
 }
 
@@ -123,7 +269,9 @@ void approximateColumnForces(const PortalFrameInput &in, double qd_kN_per_m, dou
     const double Ha = PortalSolver::trussApexHeight_m(in);
     const double halfRafter = std::hypot(0.5 * W, Ha - Hc);
     const double N_kN = qd_kN_per_m * halfRafter;
-    const double M_kNm = wd_kN_per_m * Hc * Hc / 2.0;
+    /** Rüzgâr momenti (OpenSees kapalıyken): ankastre taban ≈ konsol wd·Hc²/2; mafsallı tabanda rz serbest — kabaca iki mesnetli kiriş wd·Hc²/8. */
+    const double M_kNm = (in.columnBaseSupport == ColumnBaseSupport::Pinned) ? (wd_kN_per_m * Hc * Hc / 8.0)
+                                                                           : (wd_kN_per_m * Hc * Hc / 2.0);
     *N_column_N = N_kN * 1000.0;
     *M_base_Nm = M_kNm * 1000.0;
 }
@@ -218,6 +366,7 @@ static void pick2LTrussGroupEnvelope(const std::vector<PortalFrameResult> &combo
                                      const PortalFrameResult &refGeo,
                                      const std::vector<TurkishLoads::StrCombination> &combos,
                                      const std::vector<DoubleAngleSection> &das, double fy_Pa, double E,
+                                     Ec3Buckling::ImperfectionCurve flexCurve,
                                      const std::function<bool(const MemberResult &)> &inGroup, QString *outProfile,
                                      double *outUtil, QString *outGovComb, double bucklingK = 1.0,
                                      size_t daBegin = 0)
@@ -256,7 +405,8 @@ static void pick2LTrussGroupEnvelope(const std::vector<PortalFrameResult> &combo
                     continue;
                 }
                 const double Lm = memberLength(refGeo, m.nodeI, m.nodeJ);
-                comboMax = std::max(comboMax, trussMemberUtilEC3(m.axial_N, Lm, da, fy_Pa, E, bucklingK));
+                comboMax =
+                    std::max(comboMax, trussMemberUtilEC3(m.axial_N, Lm, da, fy_Pa, E, flexCurve, bucklingK));
             }
             if (comboMax > maxEnv) {
                 maxEnv = comboMax;
@@ -281,7 +431,8 @@ static void pick2LTrussGroupEnvelope(const std::vector<PortalFrameResult> &combo
                     continue;
                 }
                 const double Lm = memberLength(refGeo, m.nodeI, m.nodeJ);
-                comboMax = std::max(comboMax, trussMemberUtilEC3(m.axial_N, Lm, last, fy_Pa, E, bucklingK));
+                comboMax =
+                    std::max(comboMax, trussMemberUtilEC3(m.axial_N, Lm, last, fy_Pa, E, flexCurve, bucklingK));
             }
             if (comboMax > maxEnv) {
                 maxEnv = comboMax;
@@ -297,6 +448,7 @@ static void pick2LTrussGroupEnvelope(const std::vector<PortalFrameResult> &combo
 /** Tek OpenSees sonucu ile bir makas grubu için 2×L seçimi. */
 static void pick2LTrussGroupSingle(const PortalFrameResult &r, const PortalFrameResult &refGeo,
                                    const std::vector<DoubleAngleSection> &das, double fy_Pa, double E,
+                                   Ec3Buckling::ImperfectionCurve flexCurve,
                                    const std::function<bool(const MemberResult &)> &inGroup, QString *outProfile,
                                    double *outUtil, double bucklingK = 1.0, size_t daBegin = 0)
 {
@@ -325,7 +477,7 @@ static void pick2LTrussGroupSingle(const PortalFrameResult &r, const PortalFrame
                 continue;
             }
             const double Lm = memberLength(refGeo, m.nodeI, m.nodeJ);
-            maxU = std::max(maxU, trussMemberUtilEC3(m.axial_N, Lm, da, fy_Pa, E, bucklingK));
+            maxU = std::max(maxU, trussMemberUtilEC3(m.axial_N, Lm, da, fy_Pa, E, flexCurve, bucklingK));
         }
         if (maxU <= 1.0 + 1e-6) {
             *outProfile = da.designation;
@@ -341,7 +493,7 @@ static void pick2LTrussGroupSingle(const PortalFrameResult &r, const PortalFrame
                 continue;
             }
             const double Lm = memberLength(refGeo, m.nodeI, m.nodeJ);
-            maxU = std::max(maxU, trussMemberUtilEC3(m.axial_N, Lm, last, fy_Pa, E, bucklingK));
+            maxU = std::max(maxU, trussMemberUtilEC3(m.axial_N, Lm, last, fy_Pa, E, flexCurve, bucklingK));
         }
         *outProfile = last.designation + QStringLiteral(" (aşım?)");
         *outUtil = maxU;
@@ -392,7 +544,6 @@ SectionOptimizationResult optimizeSectionsEnvelope(const PortalFrameInput &input
 
     const double fy_Pa = fy_MPa * 1e6;
     const double E = input.youngModulus_Pa;
-    const double Hc = input.columnHeight_m;
     const PortalFrameResult &refGeo = comboResults.front();
 
     const auto &cols = SteelCatalog::sectionsForFamily(colFamily);
@@ -412,7 +563,7 @@ SectionOptimizationResult optimizeSectionsEnvelope(const PortalFrameInput &input
                     continue;
                 }
                 const double Mx = std::max(std::abs(m.moment_i_Nm), std::abs(m.moment_j_Nm));
-                comboMax = std::max(comboMax, columnUtilEC3(m.axial_N, Mx, sec, fy_Pa, E, Hc));
+                comboMax = std::max(comboMax, columnUtilEC3(m.axial_N, Mx, sec, fy_Pa, E, input));
             }
             if (comboMax > maxEnv) {
                 maxEnv = comboMax;
@@ -437,7 +588,7 @@ SectionOptimizationResult optimizeSectionsEnvelope(const PortalFrameInput &input
                     continue;
                 }
                 const double Mx = std::max(std::abs(m.moment_i_Nm), std::abs(m.moment_j_Nm));
-                comboMax = std::max(comboMax, columnUtilEC3(m.axial_N, Mx, sec, fy_Pa, E, Hc));
+                comboMax = std::max(comboMax, columnUtilEC3(m.axial_N, Mx, sec, fy_Pa, E, input));
             }
             if (comboMax > maxEnv) {
                 maxEnv = comboMax;
@@ -481,17 +632,20 @@ SectionOptimizationResult optimizeSectionsEnvelope(const PortalFrameInput &input
     r.trussWebCUtilization = 0.0;
     r.trussWebDUtilization = 0.0;
 
-    pick2LTrussGroupEnvelope(comboResults, refGeo, combos, das, fy_Pa, E, isChordTopSizingGroup, &r.trussTopChord2xL,
-                             &r.trussTopChordUtilization, &r.governingTrussTopCombinationId);
-    pick2LTrussGroupEnvelope(comboResults, refGeo, combos, das, fy_Pa, E, isChordBottomMem, &r.trussBottomChord2xL,
-                             &r.trussBottomChordUtilization, &r.governingTrussBottomCombinationId);
-    pick2LTrussGroupEnvelope(comboResults, refGeo, combos, das, fy_Pa, E, isEdgePostMem, &r.trussEdgePost2xL,
-                             &r.trussEdgePostUtilization, &r.governingTrussEdgePostCombinationId);
-    pick2LTrussGroupEnvelope(comboResults, refGeo, combos, das, fy_Pa, E, isWebZoneB, &r.trussWebB2xL,
+    const Ec3Buckling::ImperfectionCurve trussCurve =
+        Ec3Buckling::imperfectionCurveFromOrdinal(input.trussBucklingCurveOrdinal);
+
+    pick2LTrussGroupEnvelope(comboResults, refGeo, combos, das, fy_Pa, E, trussCurve, isChordTopSizingGroup,
+                             &r.trussTopChord2xL, &r.trussTopChordUtilization, &r.governingTrussTopCombinationId);
+    pick2LTrussGroupEnvelope(comboResults, refGeo, combos, das, fy_Pa, E, trussCurve, isChordBottomMem,
+                             &r.trussBottomChord2xL, &r.trussBottomChordUtilization, &r.governingTrussBottomCombinationId);
+    pick2LTrussGroupEnvelope(comboResults, refGeo, combos, das, fy_Pa, E, trussCurve, isEdgePostMem,
+                             &r.trussEdgePost2xL, &r.trussEdgePostUtilization, &r.governingTrussEdgePostCombinationId);
+    pick2LTrussGroupEnvelope(comboResults, refGeo, combos, das, fy_Pa, E, trussCurve, isWebZoneB, &r.trussWebB2xL,
                              &r.trussWebBUtilization, &r.governingTrussWebBCombinationId, 1.0, iSeedB);
-    pick2LTrussGroupEnvelope(comboResults, refGeo, combos, das, fy_Pa, E, isWebZoneC, &r.trussWebC2xL,
+    pick2LTrussGroupEnvelope(comboResults, refGeo, combos, das, fy_Pa, E, trussCurve, isWebZoneC, &r.trussWebC2xL,
                              &r.trussWebCUtilization, &r.governingTrussWebCCombinationId, 1.0, iSeedC);
-    pick2LTrussGroupEnvelope(comboResults, refGeo, combos, das, fy_Pa, E, isWebZoneD, &r.trussWebD2xL,
+    pick2LTrussGroupEnvelope(comboResults, refGeo, combos, das, fy_Pa, E, trussCurve, isWebZoneD, &r.trussWebD2xL,
                              &r.trussWebDUtilization, &r.governingTrussWebDCombinationId, 1.0, iSeedD);
 
     r.trussUtilization = std::max({r.trussTopChordUtilization, r.trussBottomChordUtilization,
@@ -540,7 +694,8 @@ SectionOptimizationResult optimizeSections(const PortalFrameInput &input, double
     SectionOptimizationResult r;
     const double fy_Pa = fy_MPa * 1e6;
     const double E = input.youngModulus_Pa;
-    const double Hc = input.columnHeight_m;
+    const Ec3Buckling::ImperfectionCurve trussCurve =
+        Ec3Buckling::imperfectionCurveFromOrdinal(input.trussBucklingCurveOrdinal);
 
     const bool useOsTruss = openSeesResult && hasUsableTrussForces(*openSeesResult);
     const bool useOsColumn = openSeesResult && hasUsableBeamForces(*openSeesResult);
@@ -563,7 +718,7 @@ SectionOptimizationResult optimizeSections(const PortalFrameInput &input, double
                     continue;
                 }
                 const double Mx = std::max(std::abs(m.moment_i_Nm), std::abs(m.moment_j_Nm));
-                maxUtil = std::max(maxUtil, columnUtilEC3(m.axial_N, Mx, sec, fy_Pa, E, Hc));
+                maxUtil = std::max(maxUtil, columnUtilEC3(m.axial_N, Mx, sec, fy_Pa, E, input));
             }
             if (maxUtil <= 1.0 + 1e-6) {
                 r.columnProfile = sec.designation;
@@ -579,7 +734,7 @@ SectionOptimizationResult optimizeSections(const PortalFrameInput &input, double
                     continue;
                 }
                 const double Mx = std::max(std::abs(m.moment_i_Nm), std::abs(m.moment_j_Nm));
-                maxUtil = std::max(maxUtil, columnUtilEC3(m.axial_N, Mx, sec, fy_Pa, E, Hc));
+                maxUtil = std::max(maxUtil, columnUtilEC3(m.axial_N, Mx, sec, fy_Pa, E, input));
             }
             r.columnProfile = sec.designation + QStringLiteral(" (aşım?)");
             r.columnUtilization = maxUtil;
@@ -601,7 +756,7 @@ SectionOptimizationResult optimizeSections(const PortalFrameInput &input, double
             if (sec.A_m2 < 1e-12) {
                 continue;
             }
-            const double u = columnUtilEC3(-std::abs(Nc), Mc, sec, fy_Pa, E, Hc);
+            const double u = columnUtilEC3(-std::abs(Nc), Mc, sec, fy_Pa, E, input);
             if (u <= 1.0 + 1e-6) {
                 r.columnProfile = sec.designation;
                 r.columnUtilization = u;
@@ -610,7 +765,7 @@ SectionOptimizationResult optimizeSections(const PortalFrameInput &input, double
         }
         if (r.columnProfile == QStringLiteral("—") && !cols.empty()) {
             const auto &sec = cols.back();
-            r.columnUtilization = columnUtilEC3(-std::abs(Nc), Mc, sec, fy_Pa, E, Hc);
+            r.columnUtilization = columnUtilEC3(-std::abs(Nc), Mc, sec, fy_Pa, E, input);
             r.columnProfile = sec.designation + QStringLiteral(" (aşım?)");
         }
     }
@@ -662,18 +817,18 @@ SectionOptimizationResult optimizeSections(const PortalFrameInput &input, double
     }
 
     if (useOsTruss) {
-        pick2LTrussGroupSingle(*openSeesResult, *openSeesResult, das, fy_Pa, E, isChordTopSizingGroup,
+        pick2LTrussGroupSingle(*openSeesResult, *openSeesResult, das, fy_Pa, E, trussCurve, isChordTopSizingGroup,
                                &r.trussTopChord2xL, &r.trussTopChordUtilization);
-        pick2LTrussGroupSingle(*openSeesResult, *openSeesResult, das, fy_Pa, E, isChordBottomMem,
+        pick2LTrussGroupSingle(*openSeesResult, *openSeesResult, das, fy_Pa, E, trussCurve, isChordBottomMem,
                                &r.trussBottomChord2xL, &r.trussBottomChordUtilization);
-        pick2LTrussGroupSingle(*openSeesResult, *openSeesResult, das, fy_Pa, E, isEdgePostMem, &r.trussEdgePost2xL,
-                               &r.trussEdgePostUtilization);
-        pick2LTrussGroupSingle(*openSeesResult, *openSeesResult, das, fy_Pa, E, isWebZoneB, &r.trussWebB2xL,
-                               &r.trussWebBUtilization, 1.0, iSeedB);
-        pick2LTrussGroupSingle(*openSeesResult, *openSeesResult, das, fy_Pa, E, isWebZoneC, &r.trussWebC2xL,
-                               &r.trussWebCUtilization, 1.0, iSeedC);
-        pick2LTrussGroupSingle(*openSeesResult, *openSeesResult, das, fy_Pa, E, isWebZoneD, &r.trussWebD2xL,
-                               &r.trussWebDUtilization, 1.0, iSeedD);
+        pick2LTrussGroupSingle(*openSeesResult, *openSeesResult, das, fy_Pa, E, trussCurve, isEdgePostMem,
+                               &r.trussEdgePost2xL, &r.trussEdgePostUtilization);
+        pick2LTrussGroupSingle(*openSeesResult, *openSeesResult, das, fy_Pa, E, trussCurve, isWebZoneB,
+                               &r.trussWebB2xL, &r.trussWebBUtilization, 1.0, iSeedB);
+        pick2LTrussGroupSingle(*openSeesResult, *openSeesResult, das, fy_Pa, E, trussCurve, isWebZoneC,
+                               &r.trussWebC2xL, &r.trussWebCUtilization, 1.0, iSeedC);
+        pick2LTrussGroupSingle(*openSeesResult, *openSeesResult, das, fy_Pa, E, trussCurve, isWebZoneD,
+                               &r.trussWebD2xL, &r.trussWebDUtilization, 1.0, iSeedD);
         for (const auto &m : openSeesResult->members) {
             if (m.isTruss) {
                 r.approx_N_truss_max_N = std::max(r.approx_N_truss_max_N, std::abs(m.axial_N));
@@ -691,7 +846,7 @@ SectionOptimizationResult optimizeSections(const PortalFrameInput &input, double
                 if (da.A_total_m2 < 1e-12) {
                     continue;
                 }
-                const double u = trussMemberUtilEC3(-std::abs(Nhand), Lbuck, da, fy_Pa, E, Kbuck);
+                const double u = trussMemberUtilEC3(-std::abs(Nhand), Lbuck, da, fy_Pa, E, trussCurve, Kbuck);
                 if (u <= 1.0 + 1e-6) {
                     *prof = da.designation;
                     *util = u;
@@ -700,7 +855,7 @@ SectionOptimizationResult optimizeSections(const PortalFrameInput &input, double
             }
             if (!das.empty()) {
                 const auto &last = das.back();
-                *util = trussMemberUtilEC3(-std::abs(Nhand), Lbuck, last, fy_Pa, E, Kbuck);
+                *util = trussMemberUtilEC3(-std::abs(Nhand), Lbuck, last, fy_Pa, E, trussCurve, Kbuck);
                 *prof = last.designation + QStringLiteral(" (aşım?)");
             }
         };
@@ -726,4 +881,214 @@ SectionOptimizationResult optimizeSections(const PortalFrameInput &input, double
     r.envelopeNote = QStringLiteral("Önizleme: STR üst sınır q,w ile el/tek senaryo (Calculate ile tam zarf).");
 
     return r;
+}
+
+QString runPortalSelfCheckDefaultInput()
+{
+    const double epsRel = 1e-9;
+    const double epsAbs = 1e-6;
+    PortalFrameInput in;
+    QString err;
+
+    if (!PortalSolver().validate(in, &err)) {
+        return QStringLiteral("FAIL: validate — %1").arg(err);
+    }
+
+    const double W = in.spanWidth_m;
+    const double Hc = in.columnHeight_m;
+    const double S = in.trussAxisSpacingY_m;
+    const auto ch = in.lineLoadsCharacteristic();
+
+    const double wl_exp = in.wl_kN_per_m2 * S;
+    if (std::abs(ch.wl - wl_exp) > epsAbs + epsRel * std::max(std::abs(wl_exp), 1.0)) {
+        return QStringLiteral("FAIL: characteristic wl line (expected %1, got %2)").arg(wl_exp).arg(ch.wl);
+    }
+    const double sn_exp = in.sk_kN_per_m2 * 0.8 * S;
+    if (std::abs(ch.sn - sn_exp) > epsAbs + epsRel * std::max(std::abs(sn_exp), 1.0)) {
+        return QStringLiteral("FAIL: characteristic sn line (expected %1, got %2)").arg(sn_exp).arg(ch.sn);
+    }
+
+    TurkishLoads::Ts498PartialFactors part;
+    const auto combos = TurkishLoads::strCombinationsDepremDisi(ch, part);
+    const TurkishLoads::StrCombination *s1 = nullptr;
+    const TurkishLoads::StrCombination *s2 = nullptr;
+    const TurkishLoads::StrCombination *s3 = nullptr;
+    for (const auto &c : combos) {
+        if (c.id == QStringLiteral("STR-1")) {
+            s1 = &c;
+        } else if (c.id == QStringLiteral("STR-2")) {
+            s2 = &c;
+        } else if (c.id == QStringLiteral("STR-3")) {
+            s3 = &c;
+        }
+    }
+    if (!s1 || !s2 || !s3) {
+        return QStringLiteral("FAIL: STR-1/2/3 not all present");
+    }
+
+    const double gk = ch.dl1 + ch.dl2;
+    const double q1_exp = part.gammaG * gk + part.gammaSnow * ch.sn;
+    if (std::abs(s1->q_roof_design_kN_m - q1_exp) > 1e-4 + 1e-9 * std::max(std::abs(q1_exp), 1.0)) {
+        return QStringLiteral("FAIL: STR-1 q (expected %1, got %2)").arg(q1_exp).arg(s1->q_roof_design_kN_m);
+    }
+    if (std::abs(s1->w_column_design_kN_m) > 1e-12) {
+        return QStringLiteral("FAIL: STR-1 column wind should be 0");
+    }
+
+    const double q2_exp = part.gammaG * gk + part.gammaSnow * part.psi0SnowWithWind * ch.sn;
+    const double wd2_exp = part.gammaWind * ch.wl;
+    if (std::abs(s2->q_roof_design_kN_m - q2_exp) > 1e-4 + 1e-9 * std::max(std::abs(q2_exp), 1.0)) {
+        return QStringLiteral("FAIL: STR-2 q roof");
+    }
+    if (std::abs(s2->w_column_design_kN_m - wd2_exp) > 1e-4) {
+        return QStringLiteral("FAIL: STR-2 wd column");
+    }
+
+    const double q3_exp = part.gammaG * gk;
+    const double wd3_exp = part.gammaWind * ch.wl;
+    if (std::abs(s3->q_roof_design_kN_m - q3_exp) > 1e-4 + 1e-9 * std::max(std::abs(q3_exp), 1.0)) {
+        return QStringLiteral("FAIL: STR-3 q roof");
+    }
+    if (std::abs(s3->w_column_design_kN_m - wd3_exp) > 1e-4) {
+        return QStringLiteral("FAIL: STR-3 wd column");
+    }
+
+    double Nc = 0.0;
+    double Mc = 0.0;
+    approximateColumnForces(in, s3->q_roof_design_kN_m, s3->w_column_design_kN_m, &Nc, &Mc);
+    const double Mc_hand_kNm = (in.columnBaseSupport == ColumnBaseSupport::Pinned)
+                                   ? (s3->w_column_design_kN_m * Hc * Hc / 8.0)
+                                   : (s3->w_column_design_kN_m * Hc * Hc / 2.0);
+    const double Mc_hand_Nm = Mc_hand_kNm * 1000.0;
+    if (std::abs(Mc - Mc_hand_Nm) > 1e-3 * std::max(std::abs(Mc_hand_Nm), 1.0)) {
+        return QStringLiteral("FAIL: hand column wind moment Mc (approximateColumnForces %1 vs el %2 N·m)")
+            .arg(Mc, 0, 'g', 12)
+            .arg(Mc_hand_Nm, 0, 'g', 12);
+    }
+
+    const auto &hea = SteelCatalog::sectionsForFamily(ColumnFamily::Hea);
+    if (hea.empty()) {
+        return QStringLiteral("FAIL: empty HEA catalog");
+    }
+    const RolledISection &sec0 = hea.front();
+    const double fyPa = in.fy_MPa * 1e6;
+    const double MRd = sec0.Wy_m3 * fyPa / kGammaM0;
+    const double uPureBend = columnUtilEC3(0.0, MRd, sec0, fyPa, in.youngModulus_Pa, in);
+    if (std::abs(uPureBend - 1.0) > 1e-8) {
+        return QStringLiteral("FAIL: columnUtilEC3(0, MRd) should be 1.0, got %1").arg(uPureBend, 0, 'g', 17);
+    }
+
+    PortalFrameResult geo;
+    PortalSolver::buildPortalGeometry(in, geo);
+    QString osErr;
+    const bool osOk = runOpenSeesStaticAnalysis(in, geo, s3->q_roof_design_kN_m, s3->w_column_design_kN_m, &osErr,
+                                                  nullptr);
+    const QString pinLectureNote = geo.lectureTrussComparisonNote;
+    double M_os_str3 = 0.0;
+    if (osOk) {
+        for (const auto &m : geo.members) {
+            if (m.isTruss) {
+                continue;
+            }
+            M_os_str3 = std::max(M_os_str3, std::max(std::abs(m.moment_i_Nm), std::abs(m.moment_j_Nm)));
+        }
+    }
+
+    /** STR-3’te q+wd birlikte; konsol wd·Hc²/2 sınırı yalnızca yalnız rüzgâr yüklemesinde geçerli. */
+    double M_wind_only = 0.0;
+    QString osWindErr;
+    PortalFrameResult geoWind;
+    PortalSolver::buildPortalGeometry(in, geoWind);
+    const bool osWindOk =
+        runOpenSeesStaticAnalysis(in, geoWind, 0.0, s3->w_column_design_kN_m, &osWindErr, nullptr);
+    if (osWindOk) {
+        for (const auto &m : geoWind.members) {
+            if (m.isTruss) {
+                continue;
+            }
+            M_wind_only = std::max(M_wind_only, std::max(std::abs(m.moment_i_Nm), std::abs(m.moment_j_Nm)));
+        }
+        const double M_ub = Mc_hand_Nm * 1.02 + 100.0;
+        if (M_wind_only > M_ub) {
+            return QStringLiteral(
+                       "FAIL: OpenSees wind-only column |M|max %1 exceeds cantilever upper bound wd·Hc²/2 ~%2 N·m")
+                .arg(M_wind_only, 0, 'g', 12)
+                .arg(Mc_hand_Nm, 0, 'g', 12);
+        }
+        if (M_wind_only < 1e-3 && std::abs(s3->w_column_design_kN_m) > 1e-12) {
+            return QStringLiteral("FAIL: OpenSees wind-only column moments near zero but wd is non-zero");
+        }
+    }
+
+    QStringList braceParts;
+    for (double f : PortalSolver::columnLateralBraceHeightFractionsEffective(in)) {
+        braceParts.append(QString::number(f, 'g', 8));
+    }
+    const QString braceStr =
+        braceParts.isEmpty() ? QStringLiteral("—") : braceParts.join(QLatin1Char(','));
+
+    const double Ncry_sc =
+        Ec3Buckling::eulerAxialCriticalForce_N(in.youngModulus_Pa, sec0.Iy_m4, in.columnBucklingKy, Hc);
+    const double Ncrz_sc = PortalSolver::columnElasticCriticalForceZz_N(in.youngModulus_Pa, sec0.Iz_m4, in);
+    double NcrT_sc = std::numeric_limits<double>::infinity();
+    if (sec0.It_m4 > 1e-28 && sec0.Iw_m6 > 1e-35) {
+        const double G = in.youngModulus_Pa / (2.0 * (1.0 + 0.3));
+        NcrT_sc = Ec3Buckling::eulerTorsionalFlexuralCriticalForce_N(
+            in.youngModulus_Pa, G, sec0.Iy_m4, sec0.Iz_m4, sec0.It_m4, sec0.Iw_m6, in.columnBucklingKz, Hc,
+            sec0.A_m2);
+    }
+    const double NcrMin_sc = std::min({Ncry_sc, Ncrz_sc, NcrT_sc});
+    auto fmtNkN = [](double n) {
+        if (!std::isfinite(n) || n > 0.5e308) {
+            return QStringLiteral("∞");
+        }
+        return QString::number(n / 1000.0, 'g', 8);
+    };
+
+    const QString elMcHint = (in.columnBaseSupport == ColumnBaseSupport::Pinned) ? QStringLiteral("wd·Hc²/8")
+                                                                                 : QStringLiteral("wd·Hc²/2");
+    QString rep = QStringLiteral(
+               "OK default self-check\n"
+               "  Geometry: W=%1 m, Hc=%2 m, Y=%3 m, fy=%4 MPa\n"
+               "  Characteristic line (kN/m): dl1=%5, dl2=%6, gk=%7, sn=%8, wl=%9\n"
+               "  STR-3 design: q_roof=%10 kN/m, wd_col=%11 kN/m\n"
+               "  Hand column (STR-3): el Mc=%12 kN·m (wind ref: %13); approximateColumnForces Mc=%14 kN·m\n"
+               "  columnUtilEC3(0, MRd) on lightest HEA %15: η=%16\n"
+               "  OpenSees STR-3 (q+wd): %17; column |M|max=%18 N·m\n"
+               "  OpenSees wind-only (q=0, wd): %19; column |M|max=%20 N·m (≤ wd·Hc²/2·1.02)\n"
+               "  Burkulma izi: Ky=%21 Kz=%22 tutuluş(h/H)=%23 χ_ord(kolon/makas)=%24/%25 Ncr,y≈%26 kN Ncr,z≈%27 kN Ncr,T≈%28 kN Ncr,min≈%29 kN\n")
+        .arg(W, 0, 'g', 6)
+        .arg(Hc, 0, 'g', 6)
+        .arg(S, 0, 'g', 6)
+        .arg(in.fy_MPa, 0, 'g', 6)
+        .arg(ch.dl1, 0, 'g', 8)
+        .arg(ch.dl2, 0, 'g', 8)
+        .arg(gk, 0, 'g', 8)
+        .arg(ch.sn, 0, 'g', 8)
+        .arg(ch.wl, 0, 'g', 8)
+        .arg(s3->q_roof_design_kN_m, 0, 'g', 8)
+        .arg(s3->w_column_design_kN_m, 0, 'g', 8)
+        .arg(Mc_hand_kNm, 0, 'g', 8)
+        .arg(elMcHint)
+        .arg(Mc / 1000.0, 0, 'g', 8)
+        .arg(sec0.designation)
+        .arg(uPureBend, 0, 'g', 12)
+        .arg(osOk ? QStringLiteral("ran") : QStringLiteral("skipped (%1)").arg(osErr))
+        .arg(M_os_str3, 0, 'g', 12)
+        .arg(osWindOk ? QStringLiteral("ran") : QStringLiteral("skipped (%1)").arg(osWindErr))
+        .arg(M_wind_only, 0, 'g', 12)
+        .arg(in.columnBucklingKy, 0, 'g', 6)
+        .arg(in.columnBucklingKz, 0, 'g', 6)
+        .arg(braceStr)
+        .arg(in.columnBucklingCurveOrdinal)
+        .arg(in.trussBucklingCurveOrdinal)
+        .arg(fmtNkN(Ncry_sc))
+        .arg(fmtNkN(Ncrz_sc))
+        .arg(fmtNkN(NcrT_sc))
+        .arg(fmtNkN(NcrMin_sc));
+    if (!pinLectureNote.isEmpty()) {
+        rep += QLatin1Char('\n');
+        rep += pinLectureNote;
+    }
+    return rep;
 }

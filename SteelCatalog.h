@@ -9,10 +9,20 @@ struct RolledISection
 {
     QString designation; ///< e.g. "HEA 240"
     double A_m2{0.0};    ///< gross area
-    double Wy_m3{0.0};   ///< elastic section modulus strong axis
+    double Wy_m3{0.0};   ///< elastic section modulus y-y (güçlü eksen) — 2B portal kolon eğilmesi (web düzlemde)
+    double Wz_m3{0.0};   ///< elastic section modulus z-z (zayıf eksen)
     double Iy_m4{0.0};   ///< y-y (güçlü eksen) atalet — kolon burkulması
     double Iz_m4{0.0};   ///< z-z (zayıf eksen) atalet — kolon burkulması
     double mass_kg_per_m{0.0};
+    /** EN 10365 tipik boyutlar [mm] — sınıflandırma / It,Iw; 0 = bilinmiyor. */
+    double h_mm{0.0};
+    double b_mm{0.0};
+    double tw_mm{0.0};
+    double tf_mm{0.0};
+    double r_mm{0.0};
+    /** Saint-Venant torsiyon sabiti ve burulma sabiti (hadde I yaklaşımı). */
+    double It_m4{0.0};
+    double Iw_m6{0.0};
 };
 
 /** Back-to-back equal-leg angles 2xL (same section, gap neglected for area). */

@@ -16,6 +16,10 @@ set(OPENSEES_INCLUDE_DIR "" CACHE PATH "Directory containing Domain.h, Node.h, e
 set(OPENSEES_LIBRARY_DIR "" CACHE PATH "Directory containing OpenSees libraries")
 
 add_executable(PortalSolver
+    Buckling.cpp
+    Buckling.h
+    LectureTrussSolver.cpp
+    LectureTrussSolver.h
     main.cpp
     MainWindow.cpp
     MainWindow.h

@@ -1,5 +1,6 @@
 #include "OpenSeesRunner.h"
 
+#include "LectureTrussSolver.h"
 #include "PortalSolver.h"
 #include "SectionOptimizer.h"
 #include "SteelCatalog.h"
@@ -213,26 +214,17 @@ QString buildTcl(const PortalFrameInput &in, const PortalFrameResult &geo, const
         L[m.nodeJ].second -= half;
     }
 
-    int leftEaveTag = -1;
-    int rightEaveTag = -1;
-    for (const auto &n : geo.nodes) {
-        if (std::abs(n.y - Hc) < 1e-9 && std::abs(n.x) < 1e-9) {
-            leftEaveTag = n.tag;
-            break;
+    /** Kolon rüzgârı: yayılı wd [kN/m] boyunca — uçta tek nokta wd·H yerine eleLoad beamUniform (taban momenti wd·H²/2 ile uyumlu). */
+    const double w_wind_N_m = wd * kN_to_N;
+    QString columnEleTags;
+    for (const auto &m : geo.members) {
+        if (m.isTruss) {
+            continue;
         }
-    }
-    for (const auto &n : geo.nodes) {
-        if (std::abs(n.y - Hc) < 1e-9 && std::abs(n.x - W) < 1e-9) {
-            rightEaveTag = n.tag;
-            break;
+        if (!columnEleTags.isEmpty()) {
+            columnEleTags += QLatin1Char(' ');
         }
-    }
-    const double windTotalN = wd * kN_to_N * Hc;
-    if (leftEaveTag > 0) {
-        L[leftEaveTag].first += windTotalN;
-    }
-    if (rightEaveTag > 0) {
-        L[rightEaveTag].first += windTotalN;
+        columnEleTags += QString::number(m.tag);
     }
 
     QString tcl;
@@ -240,10 +232,11 @@ QString buildTcl(const PortalFrameInput &in, const PortalFrameResult &geo, const
     tcl += QStringLiteral("model basic -ndm 2 -ndf 3\n");
     tcl += QStringLiteral("uniaxialMaterial Elastic 1 %1\n").arg(E, 0, 'g', 17);
 
+    const int rzFix = (in.columnBaseSupport == ColumnBaseSupport::Pinned) ? 0 : 1;
     for (const auto &n : geo.nodes) {
         tcl += QStringLiteral("node %1 %2 %3\n").arg(n.tag).arg(n.x, 0, 'g', 17).arg(n.y, 0, 'g', 17);
         if (isBaseNode(geo, n.tag, W) || isGussetFootNode(geo, n.tag)) {
-            tcl += QStringLiteral("fix %1 1 1 1\n").arg(n.tag);
+            tcl += QStringLiteral("fix %1 1 1 %2\n").arg(n.tag).arg(rzFix);
         }
     }
 
@@ -275,7 +268,8 @@ QString buildTcl(const PortalFrameInput &in, const PortalFrameResult &geo, const
 
     tcl += QStringLiteral("timeSeries Linear 1\n");
     tcl += QStringLiteral("pattern Plain 1 1 {\n");
-    if (L.empty()) {
+    const bool windEle = std::abs(w_wind_N_m) > 1e-12 && !columnEleTags.isEmpty();
+    if (L.empty() && !windEle) {
         tcl += QStringLiteral("  load 1 0.0 0.0 0.0\n");
     } else {
         for (const auto &kv : L) {
@@ -283,6 +277,12 @@ QString buildTcl(const PortalFrameInput &in, const PortalFrameResult &geo, const
                        .arg(kv.first)
                        .arg(kv.second.first, 0, 'g', 17)
                        .arg(kv.second.second, 0, 'g', 17);
+        }
+        if (windEle) {
+            /** geomTransf Linear: kolon +Y boyunca iken yerel y = −X; +X yönünde yayılı kuvvet için Wy = −w. */
+            tcl += QStringLiteral("  eleLoad -ele %1 -type -beamUniform %2\n")
+                       .arg(columnEleTags)
+                       .arg(-w_wind_N_m, 0, 'g', 17);
         }
     }
     tcl += QStringLiteral("}\n");
@@ -550,6 +550,14 @@ bool runOpenSeesStaticAnalysis(const PortalFrameInput &input, PortalFrameResult 
     QList<double> trussVals;
     if (readLastNumberLine(trussOut, &trussVals)) {
         parseTrussForcesLine(trussVals, ioResult);
+    }
+
+    QString lecSum;
+    if (LectureTrussSolver::compareAxialVsOpenSees(input, ioResult, q_roof_design_kN_m, w_column_design_kN_m,
+                                                   trussPhysicalSizing, &lecSum, nullptr)) {
+        ioResult.lectureTrussComparisonNote = lecSum;
+    } else if (!lecSum.isEmpty()) {
+        ioResult.lectureTrussComparisonNote = lecSum;
     }
 
     (void)logOut;

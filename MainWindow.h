@@ -6,6 +6,8 @@
 #include <memory>
 
 class QResizeEvent;
+class QComboBox;
+class QLineEdit;
 
 #include "PortalSolver.h"
 
@@ -34,6 +36,11 @@ private:
 
     std::unique_ptr<Ui::MainWindow> ui;
     QGraphicsScene *m_scene{nullptr};
+    QComboBox *m_comboColumnBase{nullptr};
+    QLineEdit *m_lineColumnZzBuckling{nullptr};
+    QLineEdit *m_lineColumnLtbBottom{nullptr};
+    QLineEdit *m_lineColumnLtbTop{nullptr};
+    QComboBox *m_comboColumnLtbCurve{nullptr};
 
     QFutureWatcher<PortalFrameResult> m_watcher;
     bool m_busy{false};

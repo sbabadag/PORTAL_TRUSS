@@ -50,6 +50,12 @@
       <property name="frameShadow">
        <enum>QFrame::Raised</enum>
       </property>
+      <property name="sizePolicy">
+       <sizepolicy hsizetype="Preferred" vsizetype="Expanding">
+        <horstretch>0</horstretch>
+        <verstretch>0</verstretch>
+       </sizepolicy>
+      </property>
       <layout class="QVBoxLayout" name="verticalLayout_sidebar">
        <item>
         <widget class="QLabel" name="label_title">
@@ -63,6 +69,12 @@
        </item>
        <item>
         <widget class="QScrollArea" name="scrollArea">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Preferred" vsizetype="Expanding">
+           <horstretch>0</horstretch>
+           <verstretch>1</verstretch>
+          </sizepolicy>
+         </property>
          <property name="widgetResizable">
           <bool>true</bool>
          </property>
@@ -433,7 +445,128 @@
              </property>
             </widget>
            </item>
-           <item row="18" column="0" colspan="2">
+           <item row="18" column="0">
+            <widget class="QLabel" name="label_colBucklingKy">
+             <property name="text">
+              <string>Column Ky (y-y)</string>
+             </property>
+             <property name="toolTip">
+              <string>Effective length factor for elastic buckling about y-y over full column height (e.g. ~2 for sway frames).</string>
+             </property>
+            </widget>
+           </item>
+           <item row="18" column="1">
+            <widget class="QDoubleSpinBox" name="spin_colBucklingKy">
+             <property name="decimals">
+              <number>2</number>
+             </property>
+             <property name="minimum">
+              <double>0.100000000000000</double>
+             </property>
+             <property name="maximum">
+              <double>20.000000000000000</double>
+             </property>
+             <property name="value">
+              <double>2.000000000000000</double>
+             </property>
+            </widget>
+           </item>
+           <item row="19" column="0">
+            <widget class="QLabel" name="label_colBucklingKz">
+             <property name="text">
+              <string>Column Kz (z-z)</string>
+             </property>
+             <property name="toolTip">
+              <string>When lateral brace heights are empty, z-z buckling uses Kz·H. With braces (fractions), each segment length uses K≈1 in the checker.</string>
+             </property>
+            </widget>
+           </item>
+           <item row="19" column="1">
+            <widget class="QDoubleSpinBox" name="spin_colBucklingKz">
+             <property name="decimals">
+              <number>2</number>
+             </property>
+             <property name="minimum">
+              <double>0.100000000000000</double>
+             </property>
+             <property name="maximum">
+              <double>20.000000000000000</double>
+             </property>
+             <property name="value">
+              <double>2.000000000000000</double>
+             </property>
+            </widget>
+           </item>
+           <item row="20" column="0">
+            <widget class="QLabel" name="label_colBucklingCurve">
+             <property name="text">
+              <string>Column χ curve</string>
+             </property>
+             <property name="toolTip">
+              <string>EN 1993-1-1 Tablo 6.1 imperfection eğrisi (eksenel eğilme burkulması χ için α).</string>
+             </property>
+            </widget>
+           </item>
+           <item row="20" column="1">
+            <widget class="QComboBox" name="combo_colBucklingCurve"/>
+           </item>
+           <item row="21" column="0">
+            <widget class="QLabel" name="label_trussBucklingCurve">
+             <property name="text">
+              <string>Truss χ curve</string>
+             </property>
+             <property name="toolTip">
+              <string>Makas 2×L basınç çubukları için aynı imperfection eğrisi (Tablo 6.1).</string>
+             </property>
+            </widget>
+           </item>
+           <item row="21" column="1">
+            <widget class="QComboBox" name="combo_trussBucklingCurve"/>
+           </item>
+           <item row="22" column="0">
+            <widget class="QLabel" name="label_colBraceHeights">
+             <property name="text">
+              <string>Lateral brace h/H</string>
+             </property>
+             <property name="toolTip">
+              <string>İsteğe bağlı: tabandan h/H (0,1), virgülle. z-z segmentleri; makas tutuluşu açıksa bu oranlarla birleştirilir.</string>
+             </property>
+            </widget>
+           </item>
+           <item row="22" column="1">
+            <widget class="QLineEdit" name="line_colBraceHeights">
+             <property name="placeholderText">
+              <string>e.g. 0.5</string>
+             </property>
+            </widget>
+           </item>
+           <item row="23" column="0" colspan="2">
+            <widget class="QCheckBox" name="check_colBraceFromTruss">
+             <property name="text">
+              <string>Makas alt hattı (+45° gusset) kolon z-z tutuluşu (geometriden)</string>
+             </property>
+             <property name="toolTip">
+              <string>İşaretliyken alt hat köşesi (Hc−W/40) ve 45° gussetin kolon üzerindeki alt düğümü h/H oranları z-z Euler segmentlerine eklenir; üst hat bu modelde kolona yalnızca mahyada bağlanır. İsteğe bağlı ek oranlar sağdaki satıra yazılabilir.</string>
+             </property>
+             <property name="checked">
+              <bool>true</bool>
+             </property>
+            </widget>
+           </item>
+           <item row="24" column="0" colspan="2">
+            <widget class="QLabel" name="label_buckle_hint">
+             <property name="text">
+              <string>Buckling: simplified Euler χ; z-z segments use merged brace h/H (optional truss-derived + manual list). Verify Ky/Kz with your basis of design.</string>
+             </property>
+             <property name="wordWrap">
+              <bool>true</bool>
+             </property>
+             <property name="styleSheet">
+              <string notr="true">color: palette(mid); font-size: 11px;</string>
+             </property>
+            </widget>
+           </item>
+           <item row="25" column="0" colspan="2">
             <widget class="QLabel" name="label_ts498_hint">
              <property name="text">
               <string>Kar yükü SK yukarıda veri girişidir (TS 498). Makas ölü otomatik; aşık/kaplama elle. STR: γG=1.35 (ölü), 1.50 (kar,rüzgar); deprem ayrı.</string>
@@ -460,25 +593,15 @@
        <item>
         <widget class="QLabel" name="label_status">
          <property name="text">
-          <string>Ready.</string>
+          <string>Durum: geometri önizlemesi; OpenSees özeti altta.</string>
          </property>
          <property name="wordWrap">
           <bool>true</bool>
          </property>
+         <property name="styleSheet">
+          <string notr="true">color: palette(mid); font-size: 11px;</string>
+         </property>
         </widget>
-       </item>
-       <item>
-        <spacer name="verticalSpacer">
-         <property name="orientation">
-          <enum>Qt::Vertical</enum>
-         </property>
-         <property name="sizeHint" stdset="0">
-          <size>
-           <width>20</width>
-           <height>40</height>
-          </size>
-         </property>
-        </spacer>
        </item>
       </layout>
      </widget>
@@ -491,9 +614,18 @@
       <property name="frameShadow">
        <enum>QFrame::Sunken</enum>
       </property>
+      <property name="sizePolicy">
+       <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+        <horstretch>1</horstretch>
+        <verstretch>0</verstretch>
+       </sizepolicy>
+      </property>
       <layout class="QVBoxLayout" name="verticalLayout_view">
        <property name="spacing">
         <number>4</number>
+       </property>
+       <property name="bottomMargin">
+        <number>0</number>
        </property>
        <item>
         <widget class="QLabel" name="label_viewTitle">
@@ -503,7 +635,81 @@
         </widget>
        </item>
        <item>
-        <widget class="QGraphicsView" name="graphicsView"/>
+        <widget class="QGraphicsView" name="graphicsView">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+           <horstretch>1</horstretch>
+           <verstretch>1</verstretch>
+          </sizepolicy>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QWidget" name="widget_results_row">
+         <layout class="QHBoxLayout" name="horizontalLayout_results">
+          <property name="spacing">
+           <number>8</number>
+          </property>
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <widget class="QGroupBox" name="groupBox_opensees">
+            <property name="title">
+             <string>OpenSees — beam-column + Tcl</string>
+            </property>
+            <layout class="QVBoxLayout" name="verticalLayout_opensees">
+             <property name="spacing">
+              <number>4</number>
+             </property>
+             <property name="leftMargin">
+              <number>6</number>
+             </property>
+             <property name="topMargin">
+              <number>4</number>
+             </property>
+             <property name="rightMargin">
+              <number>6</number>
+             </property>
+             <property name="bottomMargin">
+              <number>6</number>
+             </property>
+             <item>
+              <widget class="QTextEdit" name="text_result_opensees">
+               <property name="readOnly">
+                <bool>true</bool>
+               </property>
+               <property name="minimumHeight">
+                <number>72</number>
+               </property>
+               <property name="maximumHeight">
+                <number>220</number>
+               </property>
+               <property name="horizontalScrollBarPolicy">
+                <enum>Qt::ScrollBarAsNeeded</enum>
+               </property>
+               <property name="verticalScrollBarPolicy">
+                <enum>Qt::ScrollBarAsNeeded</enum>
+               </property>
+               <property name="placeholderText">
+                <string>OpenSees özeti burada (Calculate sonrası).</string>
+               </property>
+              </widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
+         </layout>
+        </widget>
        </item>
       </layout>
      </widget>
