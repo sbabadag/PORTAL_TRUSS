@@ -7,21 +7,76 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QTemporaryDir>
+#include <QThread>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <map>
 #include <utility>
+
+#ifdef Q_OS_WIN
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
 constexpr double kN_to_N = 1000.0;
+
+bool stderrIsConsole()
+{
+#ifdef Q_OS_WIN
+    return _isatty(_fileno(stderr)) != 0;
+#else
+    return isatty(fileno(stderr)) != 0;
+#endif
+}
+
+/**
+ * OpenSees aşamaları ve süreç çıktısını stderr’e yaz (cmd/PowerShell’den çalıştırınca görünür).
+ * PORTAL_OPENSEES_CONSOLE=1|0 — stderr TTY değilken zorla aç/kapat.
+ */
+bool openSeesConsoleEcho()
+{
+    const QByteArray raw = qgetenv("PORTAL_OPENSEES_CONSOLE");
+    if (!raw.isEmpty()) {
+        const QString s = QString::fromLatin1(raw.trimmed()).toUpper();
+        if (s == QStringLiteral("1") || s == QStringLiteral("TRUE") || s == QStringLiteral("YES")
+            || s == QStringLiteral("ON")) {
+            return true;
+        }
+        if (s == QStringLiteral("0") || s == QStringLiteral("FALSE") || s == QStringLiteral("NO")
+            || s == QStringLiteral("OFF")) {
+            return false;
+        }
+    }
+    return stderrIsConsole();
+}
+
+void writeUtf8LineToStderr(const QString &line)
+{
+    const QByteArray b = line.toUtf8() + '\n';
+    fwrite(b.constData(), 1, static_cast<size_t>(b.size()), stderr);
+    fflush(stderr);
+}
+
+void writeUtf8ChunkToStderr(const QByteArray &chunk)
+{
+    if (chunk.isEmpty()) {
+        return;
+    }
+    fwrite(chunk.constData(), 1, static_cast<size_t>(chunk.size()), stderr);
+    fflush(stderr);
+}
 
 void trussElasticA_I(const PortalFrameInput &in, const SectionOptimizationResult *sizing, const MemberResult &member,
                      double *Aout, double *Iout)
@@ -70,17 +125,22 @@ void trussElasticA_I(const PortalFrameInput &in, const SectionOptimizationResult
         return;
     }
 
-    const auto sec = SteelCatalog::tryGetDoubleAngle2L(prof);
-    if (!sec.has_value()) {
-        *Aout = A_nom;
-        *Iout = I_truss_uniform;
+    if (const auto da = SteelCatalog::tryGetDoubleAngle2L(prof); da.has_value()) {
+        const DoubleAngleSection &d = *da;
+        *Aout = d.A_total_m2;
+        const double i = std::max(d.i_buckling_m > 0.0 ? d.i_buckling_m : d.i_min_m, 1e-9);
+        *Iout = std::max((*Aout) * i * i, 1e-14);
+        return;
+    }
+    if (const auto ri = SteelCatalog::tryGetRolledI(prof); ri.has_value()) {
+        *Aout = ri->A_m2;
+        /** 2B düzlem: esnek burkulmaya muhafazakâr yaklaşım — min(Iy,Iz) ile rijitlik. */
+        *Iout = std::max(std::min(ri->Iy_m4, ri->Iz_m4), 1e-14);
         return;
     }
 
-    const DoubleAngleSection &d = *sec;
-    *Aout = d.A_total_m2;
-    const double i = std::max(d.i_buckling_m > 0.0 ? d.i_buckling_m : d.i_min_m, 1e-9);
-    *Iout = std::max((*Aout) * i * i, 1e-14);
+    *Aout = A_nom;
+    *Iout = I_truss_uniform;
 }
 
 /** OpenSees dosyaları çoğunlukla TAB ile ayrılır; split(' ') yalnızca boşlukta böler — kuvvetler sıfır kalırdı. */
@@ -145,6 +205,23 @@ bool isBaseNode(const PortalFrameResult &r, int tag, double W)
 }
 
 /** Uç gusset çubuğunun alt düğümü (aşağı inen uç — mesnet). */
+/** Kolon veya gusset şeridi (kirış) — düğümde dönme rijitliği vardır; saf makas düğümlerinde rz serbest kalmamalı. */
+bool hasIncidentColumnOrGussetBeam(const PortalFrameResult &r, int tag)
+{
+    for (const auto &m : r.members) {
+        if (m.nodeI != tag && m.nodeJ != tag) {
+            continue;
+        }
+        if (!m.isTruss) {
+            return true;
+        }
+        if (m.trussRole == TrussMemberRole::GussetStrip) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool isGussetFootNode(const PortalFrameResult &r, int tag)
 {
     for (const auto &m : r.members) {
@@ -190,12 +267,18 @@ QString buildTcl(const PortalFrameInput &in, const PortalFrameResult &geo, const
     const double Ic = in.steelInertia_m4;
     const double W = in.spanWidth_m;
     const double Hc = in.columnHeight_m;
+    const bool makasTekEksenelTruss =
+        (in.trussMemberSectionForm >= 1 && in.trussMemberSectionForm <= 2);
 
     std::map<int, std::pair<double, double>> L;
 
     for (size_t mi = 0; mi < geo.members.size(); ++mi) {
         const auto &m = geo.members[mi];
-        if (!m.isTruss || !m.carriesRoofLineLoad) {
+        if (!m.carriesRoofLineLoad) {
+            continue;
+        }
+        /** Mahya elastik kiriş: çatı yükü `eleLoad -beamUniform` ile verilir (düğüm yaması M’yi düşürürdü). */
+        if (!m.isTruss && m.trussRole == TrussMemberRole::RafterBeam) {
             continue;
         }
         double xi = 0.0;
@@ -218,7 +301,7 @@ QString buildTcl(const PortalFrameInput &in, const PortalFrameResult &geo, const
     const double w_wind_N_m = wd * kN_to_N;
     QString columnEleTags;
     for (const auto &m : geo.members) {
-        if (m.isTruss) {
+        if (m.isTruss || m.trussRole != TrussMemberRole::Column) {
             continue;
         }
         if (!columnEleTags.isEmpty()) {
@@ -240,18 +323,48 @@ QString buildTcl(const PortalFrameInput &in, const PortalFrameResult &geo, const
         }
     }
 
+    if (makasTekEksenelTruss) {
+        /** Hadde I makas: `truss` elemanı rz taşımaz — yalnızca makas/kolon-ayrı düğümlerde rz tutulu. */
+        for (const auto &n : geo.nodes) {
+            if (isBaseNode(geo, n.tag, W) || isGussetFootNode(geo, n.tag)) {
+                continue;
+            }
+            if (!hasIncidentColumnOrGussetBeam(geo, n.tag)) {
+                tcl += QStringLiteral("fix %1 0 0 1\n").arg(n.tag);
+            }
+        }
+    }
+
     tcl += QStringLiteral("geomTransf Linear 1\n");
 
     for (const auto &m : geo.members) {
         const int eid = m.tag;
         if (!m.isTruss) {
+            double Ab = Ac;
+            double Ib = Ic;
+            if (m.trussRole == TrussMemberRole::RafterBeam && trussPhysicalSizing) {
+                if (const auto ri = SteelCatalog::tryGetRolledI(trussPhysicalSizing->rafterBeamProfile);
+                    ri.has_value()) {
+                    Ab = ri->A_m2;
+                    Ib = std::max(ri->Iy_m4, 1e-14);
+                }
+            }
             tcl += QStringLiteral("element elasticBeamColumn %1 %2 %3 %4 %5 %6 1\n")
                        .arg(eid)
                        .arg(m.nodeI)
                        .arg(m.nodeJ)
-                       .arg(Ac, 0, 'g', 17)
+                       .arg(Ab, 0, 'g', 17)
                        .arg(E, 0, 'g', 17)
-                       .arg(Ic, 0, 'g', 17);
+                       .arg(Ib, 0, 'g', 17);
+        } else if (makasTekEksenelTruss && m.trussRole != TrussMemberRole::GussetStrip) {
+            double Atr = in.steelArea_m2;
+            double ItrUnused = 0.0;
+            trussElasticA_I(in, trussPhysicalSizing, m, &Atr, &ItrUnused);
+            tcl += QStringLiteral("element truss %1 %2 %3 %4 1\n")
+                       .arg(eid)
+                       .arg(m.nodeI)
+                       .arg(m.nodeJ)
+                       .arg(Atr, 0, 'g', 17);
         } else {
             double Atr = in.steelArea_m2;
             double Itr = std::max(Ic * 1.0e-5, 1e-14);
@@ -285,6 +398,25 @@ QString buildTcl(const PortalFrameInput &in, const PortalFrameResult &geo, const
                        .arg(-w_wind_N_m, 0, 'g', 17);
         }
     }
+    for (const auto &m : geo.members) {
+        if (m.isTruss || m.trussRole != TrussMemberRole::RafterBeam || !m.carriesRoofLineLoad) {
+            continue;
+        }
+        double xi = 0.0;
+        double yi = 0.0;
+        double xj = 0.0;
+        double yj = 0.0;
+        if (!nodeCoords(geo, m.nodeI, xi, yi) || !nodeCoords(geo, m.nodeJ, xj, yj)) {
+            continue;
+        }
+        const double wy = PortalSolver::rafterRoofUniformLocalY_N_per_m(w_N_m, xi, yi, xj, yj);
+        if (std::abs(wy) < 1e-18) {
+            continue;
+        }
+        tcl += QStringLiteral("  eleLoad -ele %1 -type -beamUniform %2\n")
+                   .arg(m.tag)
+                   .arg(wy, 0, 'g', 17);
+    }
     tcl += QStringLiteral("}\n");
 
     QString nodeList;
@@ -295,7 +427,7 @@ QString buildTcl(const PortalFrameInput &in, const PortalFrameResult &geo, const
         nodeList += QString::number(n.tag);
     }
 
-    /** GussetStrip: Tcl’de elasticBeamColumn (6 yerel bileşen); basicForces yalnızca 3 değer — makas kaydına koymak tüm kuvvet satırını kaydırır. */
+    /** Kolon / mahya / gusset kirış: Tcl’de `elasticBeamColumn`; `basicForces` çıktısı eleman başına 3 sayı (N, M₁, M₂). */
     auto usesBeamForceRecorder = [](const MemberResult &m) {
         return !m.isTruss || m.trussRole == TrussMemberRole::GussetStrip;
     };
@@ -333,8 +465,9 @@ QString buildTcl(const PortalFrameInput &in, const PortalFrameResult &geo, const
                .arg(np, nodeList);
 
     if (!beamEles.isEmpty()) {
-        // OpenSees: seçenek adı "localForce" (başında tire yok); "-localForce" kaydı bozar.
-        tcl += QStringLiteral("recorder Element -file {%1} -time -ele %2 localForce\n")
+        /** `basicForces`: elastik kiriş için doğrudan q = [N, M₁, M₂] (yerel temel sistem). `localForce` 6 bileşen
+         *  P(0)…P(5) ile aynı M’leri üretir ancak eksenel bileşen farklı kombinasyonlarda moment okumasını zorlaştırır. */
+        tcl += QStringLiteral("recorder Element -file {%1} -time -ele %2 basicForces\n")
                    .arg(bp, beamEles);
     }
     if (!trussEles.isEmpty()) {
@@ -405,32 +538,43 @@ void parseBeamForcesLine(const QList<double> &vals, PortalFrameResult &geo)
     for (auto &m : geo.members) {
         const bool beamRec = !m.isTruss || m.trussRole == TrussMemberRole::GussetStrip;
         if (beamRec) {
-            if (idx + 5 < static_cast<int>(vals.size())) {
-                const double n1 = vals[idx];
-                const double n2 = vals[idx + 3];
-                m.axial_N = (std::abs(n1) >= std::abs(n2)) ? n1 : n2;
-                m.moment_i_Nm = vals[idx + 2];
-                m.moment_j_Nm = vals[idx + 5];
-            }
-            idx += 6;
-        }
-    }
-}
-
-void parseTrussForcesLine(const QList<double> &vals, PortalFrameResult &geo)
-{
-    if (vals.size() < 2) {
-        return;
-    }
-    int idx = 1;
-    for (auto &m : geo.members) {
-        if (m.isTruss && m.trussRole != TrussMemberRole::GussetStrip) {
+            /** OpenSees `elasticBeamColumn` + `basicForces`: eleman başına 3 sayı (N, M₁, M₂) [N, N·m]. */
             if (idx + 2 < static_cast<int>(vals.size())) {
                 m.axial_N = vals[idx];
                 m.moment_i_Nm = vals[idx + 1];
                 m.moment_j_Nm = vals[idx + 2];
             }
             idx += 3;
+        }
+    }
+}
+
+void parseTrussForcesLine(const QList<double> &vals, PortalFrameResult &geo, const PortalFrameInput &input)
+{
+    if (vals.size() < 2) {
+        return;
+    }
+    const bool openSeesTrussBar =
+        (input.trussMemberSectionForm >= 1 && input.trussMemberSectionForm <= 2);
+
+    int idx = 1;
+    for (auto &m : geo.members) {
+        if (m.isTruss && m.trussRole != TrussMemberRole::GussetStrip) {
+            if (openSeesTrussBar) {
+                if (idx < static_cast<int>(vals.size())) {
+                    m.axial_N = vals[idx];
+                    m.moment_i_Nm = 0.0;
+                    m.moment_j_Nm = 0.0;
+                }
+                idx += 1;
+            } else {
+                if (idx + 2 < static_cast<int>(vals.size())) {
+                    m.axial_N = vals[idx];
+                    m.moment_i_Nm = vals[idx + 1];
+                    m.moment_j_Nm = vals[idx + 2];
+                }
+                idx += 3;
+            }
         }
     }
 }
@@ -457,6 +601,26 @@ bool readLastNumberLine(const QString &path, QList<double> *out)
     }
     *out = parseNumericTokens(lastLine);
     return !out->isEmpty();
+}
+
+bool expectsBeamForceRecorder(const PortalFrameResult &geo)
+{
+    for (const auto &m : geo.members) {
+        if (!m.isTruss || m.trussRole == TrussMemberRole::GussetStrip) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool expectsTrussForceRecorder(const PortalFrameResult &geo)
+{
+    for (const auto &m : geo.members) {
+        if (m.isTruss && m.trussRole != TrussMemberRole::GussetStrip) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -511,19 +675,74 @@ bool runOpenSeesStaticAnalysis(const PortalFrameInput &input, PortalFrameResult 
     }
     proc.setProcessEnvironment(env);
     proc.setProcessChannelMode(QProcess::MergedChannels);
+
+    const bool echo = openSeesConsoleEcho();
+    QByteArray logOut;
+
+    if (echo) {
+        writeUtf8LineToStderr(QString());
+        writeUtf8LineToStderr(
+            QStringLiteral("── PortalSolver / OpenSees ──────────────────────────────────────"));
+        writeUtf8LineToStderr(QStringLiteral("Geçici klasör: %1").arg(tmpDir.path()));
+        writeUtf8LineToStderr(QStringLiteral("Tcl dosyası: %1").arg(tclPath));
+        writeUtf8LineToStderr(QStringLiteral("OpenSees yürütülebilir: %1").arg(exe));
+        writeUtf8LineToStderr(QStringLiteral("Çalışma dizini: %1").arg(tmpDir.path()));
+        writeUtf8LineToStderr(
+            QStringLiteral("Tasarım yükleri: qd,çatı = %1 kN/m, wd,kolon = %2 kN/m")
+                .arg(q_roof_design_kN_m, 0, 'g', 12)
+                .arg(w_column_design_kN_m, 0, 'g', 12));
+        writeUtf8LineToStderr(QStringLiteral("OpenSees başlatılıyor… (çıktı canlı akar)"));
+        writeUtf8LineToStderr(QStringLiteral("──────────────────────────────────────────────────────────────"));
+    }
+
     proc.start();
-    if (!proc.waitForFinished(120000)) {
-        proc.kill();
+    if (!proc.waitForStarted(30000)) {
         if (errorOut) {
-            *errorOut = QStringLiteral(
-                "OpenSees başlatılamadı veya zaman aşımı. "
-                "https://opensees.github.io/OpenSees/ üzerinden indirip OPENSEES_EXE ortam değişkenine tam yolu "
-                "yazın veya OpenSees.exe’yi PATH’e ekleyin.");
+            *errorOut = QStringLiteral("OpenSees başlatılamadı: %1").arg(proc.errorString());
         }
         return false;
     }
 
-    const QByteArray logOut = proc.readAllStandardOutput() + proc.readAllStandardError();
+    QElapsedTimer wall;
+    wall.start();
+    constexpr int kOpenSeesTimeoutMs = 120000;
+    while (proc.state() == QProcess::Running) {
+        if (wall.elapsed() > kOpenSeesTimeoutMs) {
+            proc.kill();
+            proc.waitForFinished(5000);
+            if (errorOut) {
+                *errorOut = QStringLiteral(
+                    "OpenSees zaman aşımı (120 s). "
+                    "https://opensees.github.io/OpenSees/ üzerinden indirip OPENSEES_EXE ortam değişkenine tam yolu "
+                    "yazın veya OpenSees.exe’yi PATH’e ekleyin.");
+            }
+            return false;
+        }
+        if (proc.waitForReadyRead(400)) {
+            const QByteArray chunk = proc.readAllStandardOutput();
+            logOut += chunk;
+            if (echo) {
+                writeUtf8ChunkToStderr(chunk);
+            }
+        } else if (proc.state() == QProcess::Running) {
+            QThread::msleep(40);
+        }
+    }
+    {
+        const QByteArray tail = proc.readAllStandardOutput();
+        logOut += tail;
+        if (echo) {
+            writeUtf8ChunkToStderr(tail);
+        }
+    }
+
+    if (echo) {
+        writeUtf8LineToStderr(QStringLiteral("──────────────────────────────────────────────────────────────"));
+        writeUtf8LineToStderr(
+            QStringLiteral("OpenSees süreç sonu: çıkış kodu %1, süre ~%2 ms")
+                .arg(proc.exitCode())
+                .arg(wall.elapsed()));
+    }
 
     if (proc.exitCode() != 0) {
         if (errorOut) {
@@ -532,6 +751,11 @@ bool runOpenSeesStaticAnalysis(const PortalFrameInput &input, PortalFrameResult 
                             .arg(QString::fromUtf8(logOut.left(4000)));
         }
         return false;
+    }
+
+    if (echo) {
+        writeUtf8LineToStderr(
+            QStringLiteral("OpenSees çıktı dosyaları okunuyor (düğüm yer değiştirmesi, kiriş ve makas kuvvetleri)…"));
     }
 
     QString perr;
@@ -546,20 +770,36 @@ bool runOpenSeesStaticAnalysis(const PortalFrameInput &input, PortalFrameResult 
     QList<double> beamVals;
     if (readLastNumberLine(beamOut, &beamVals)) {
         parseBeamForcesLine(beamVals, ioResult);
+    } else if (expectsBeamForceRecorder(ioResult)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("OpenSees kiriş/kolon kuvvet dosyası okunamadı veya boş: %1")
+                            .arg(beamOut);
+        }
+        return false;
     }
     QList<double> trussVals;
     if (readLastNumberLine(trussOut, &trussVals)) {
-        parseTrussForcesLine(trussVals, ioResult);
+        parseTrussForcesLine(trussVals, ioResult, input);
+    } else if (expectsTrussForceRecorder(ioResult)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("OpenSees makas kuvvet dosyası okunamadı veya boş: %1")
+                            .arg(trussOut);
+        }
+        return false;
     }
 
     QString lecSum;
-    if (LectureTrussSolver::compareAxialVsOpenSees(input, ioResult, q_roof_design_kN_m, w_column_design_kN_m,
-                                                   trussPhysicalSizing, &lecSum, nullptr)) {
+    if (input.trussMemberSectionForm != 3
+        && LectureTrussSolver::compareAxialVsOpenSees(input, ioResult, q_roof_design_kN_m, w_column_design_kN_m,
+                                                      trussPhysicalSizing, &lecSum, nullptr)) {
         ioResult.lectureTrussComparisonNote = lecSum;
-    } else if (!lecSum.isEmpty()) {
+    } else if (input.trussMemberSectionForm != 3 && !lecSum.isEmpty()) {
         ioResult.lectureTrussComparisonNote = lecSum;
     }
 
-    (void)logOut;
+    if (echo) {
+        writeUtf8LineToStderr(QStringLiteral("OpenSees analiz adımı tamam."));
+        writeUtf8LineToStderr(QString());
+    }
     return true;
 }

@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
-#include <optional>
 
 #include <QBrush>
 #include <QFont>
@@ -22,6 +21,7 @@
 #include <QMessageBox>
 #include <QPolygonF>
 #include <QResizeEvent>
+#include <QRegularExpression>
 #include <QGraphicsScene>
 #include <QTextEdit>
 #include <QCheckBox>
@@ -31,8 +31,133 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
+#include <QAbstractSpinBox>
+#include <QDoubleSpinBox>
+#include <QLocale>
+#include <QPointer>
+#include <QSpinBox>
+#include <QTimer>
 
 namespace {
+
+/** Satır düzenleyicide kalan metni sayıya zorlar (Enter/odak olmadan Hesapla / önizleme). */
+void commitAllSpinBoxEdits(QWidget *root)
+{
+    if (!root) {
+        return;
+    }
+    const auto spins = root->findChildren<QAbstractSpinBox *>();
+    for (QAbstractSpinBox *s : spins) {
+        if (s) {
+            s->blockSignals(true);
+        }
+    }
+    for (QDoubleSpinBox *dsb : root->findChildren<QDoubleSpinBox *>()) {
+        if (!dsb || dsb->isReadOnly()) {
+            continue;
+        }
+        bool ok = false;
+        const double v = dsb->locale().toDouble(dsb->cleanText(), &ok);
+        if (ok && std::isfinite(v)) {
+            const double c = std::clamp(v, dsb->minimum(), dsb->maximum());
+            dsb->setValue(c);
+        }
+    }
+    for (QSpinBox *sb : root->findChildren<QSpinBox *>()) {
+        if (!sb || sb->isReadOnly()) {
+            continue;
+        }
+        bool ok = false;
+        const int v = sb->locale().toInt(sb->cleanText(), &ok);
+        if (ok) {
+            const int c = std::clamp(v, sb->minimum(), sb->maximum());
+            sb->setValue(c);
+        }
+    }
+    for (QAbstractSpinBox *s : spins) {
+        if (s) {
+            s->interpretText();
+            s->blockSignals(false);
+        }
+    }
+}
+
+bool sameFracLists(const std::vector<double> &a, const std::vector<double> &b)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::abs(a[i] - b[i]) > 1e-9 + 1e-12 * std::max(std::abs(a[i]), std::abs(b[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool sameLoadAndSteelInputsForDesign(const PortalFrameInput &cur, const PortalFrameInput &ref)
+{
+    const auto near = [](double x, double y) {
+        return std::abs(x - y) <= 1e-9 + 1e-12 * std::max(std::abs(x), std::abs(y));
+    };
+    if (!near(cur.spanWidth_m, ref.spanWidth_m) || !near(cur.columnHeight_m, ref.columnHeight_m)) {
+        return false;
+    }
+    if (!near(cur.trussAxisSpacingY_m, ref.trussAxisSpacingY_m)) {
+        return false;
+    }
+    if (!near(cur.steelArea_m2, ref.steelArea_m2) || !near(cur.steelInertia_m4, ref.steelInertia_m4)
+        || !near(cur.youngModulus_Pa, ref.youngModulus_Pa)) {
+        return false;
+    }
+    if (!near(cur.purlinCladding_kN_per_m2, ref.purlinCladding_kN_per_m2)
+        || !near(cur.dl2_kN_per_m2, ref.dl2_kN_per_m2) || !near(cur.sk_kN_per_m2, ref.sk_kN_per_m2)
+        || !near(cur.wl_kN_per_m2, ref.wl_kN_per_m2)) {
+        return false;
+    }
+    if (!near(cur.fy_MPa, ref.fy_MPa)) {
+        return false;
+    }
+    if (cur.columnFamilyIndex != ref.columnFamilyIndex || cur.trussMemberSectionForm != ref.trussMemberSectionForm) {
+        return false;
+    }
+    const bool bothIpeRafter = cur.trussMemberSectionForm == 3 && ref.trussMemberSectionForm == 3;
+    if (!bothIpeRafter && cur.trussPanelsPerSide != ref.trussPanelsPerSide) {
+        return false;
+    }
+    if (cur.columnBaseSupport != ref.columnBaseSupport) {
+        return false;
+    }
+    if (!near(cur.columnBucklingKy, ref.columnBucklingKy) || !near(cur.columnBucklingKz, ref.columnBucklingKz)) {
+        return false;
+    }
+    if (cur.columnBucklingCurveOrdinal != ref.columnBucklingCurveOrdinal
+        || cur.trussBucklingCurveOrdinal != ref.trussBucklingCurveOrdinal) {
+        return false;
+    }
+    if (cur.columnLtbCurveOrdinal != ref.columnLtbCurveOrdinal) {
+        return false;
+    }
+    if (cur.columnLateralBraceFromTrussGeometry != ref.columnLateralBraceFromTrussGeometry) {
+        return false;
+    }
+    if (!sameFracLists(cur.columnLateralBraceHeightFractions, ref.columnLateralBraceHeightFractions)) {
+        return false;
+    }
+    if (!sameFracLists(cur.columnZzBucklingBraceHeightFractions, ref.columnZzBucklingBraceHeightFractions)) {
+        return false;
+    }
+    if (!sameFracLists(cur.columnLtbBottomFlangeBraceHeightFractions, ref.columnLtbBottomFlangeBraceHeightFractions)) {
+        return false;
+    }
+    if (!sameFracLists(cur.columnLtbTopFlangeBraceHeightFractions, ref.columnLtbTopFlangeBraceHeightFractions)) {
+        return false;
+    }
+    if (!sameFracLists(cur.trussRestraintFractions, ref.trussRestraintFractions)) {
+        return false;
+    }
+    return true;
+}
 
 QPointF scenePoint(double x, double y, double scale, double originX, double originY)
 {
@@ -96,6 +221,9 @@ QString stripProfileSuffix(const QString &s)
 
 QString memberProfileLabel(const MemberResult &m, const SectionOptimizationResult &opt)
 {
+    if (m.trussRole == TrussMemberRole::RafterBeam) {
+        return stripProfileSuffix(opt.rafterBeamProfile);
+    }
     if (!m.isTruss) {
         return stripProfileSuffix(opt.columnProfile);
     }
@@ -147,6 +275,31 @@ MainWindow::MainWindow(QWidget *parent)
     ui->combo_columnFamily->addItems({QStringLiteral("HEA"), QStringLiteral("HEB"), QStringLiteral("IPE")});
     ui->combo_columnFamily->setCurrentIndex(1); // varsayılan test: HEB
 
+    m_comboTrussSectionForm = new QComboBox(ui->scrollAreaWidgetContents);
+    m_comboTrussSectionForm->addItem(tr("Çift açı (2×L)"));
+    m_comboTrussSectionForm->addItem(tr("Hadde I — HEA (pütrel)"));
+    m_comboTrussSectionForm->addItem(tr("Hadde I — HEB (pütrel)"));
+    m_comboTrussSectionForm->addItem(tr("IPE pütrel — mahya (tek kiriş, makas yok)"));
+    m_comboTrussSectionForm->setCurrentIndex(0);
+    m_comboTrussSectionForm->setToolTip(
+        tr("Çatı hattı / pütrel modeli.\n"
+           "2×L veya hadde I (HEA/HEB): Warren makası; tasarımda TS EN 1993-1-1 eksenel χ; OpenSees’te makas "
+           "`truss` (tek eksenel), gusset şeridi kiriş.\n"
+           "IPE pütrel: Warren yok; mahya iki yarım elastik kiriş (OpenSees beam-column), EC3 N+M. "
+           "Kesit seçiminde IPE yetersizse otomatik HEA, sonra HEB katalogları denenir."));
+    auto *lblTrussForm = new QLabel(tr("Makas kesiti"), ui->scrollAreaWidgetContents);
+    lblTrussForm->setToolTip(m_comboTrussSectionForm->toolTip());
+    ui->formLayout->addRow(lblTrussForm, m_comboTrussSectionForm);
+
+    m_lineTrussRestraints = new QLineEdit(ui->scrollAreaWidgetContents);
+    m_lineTrussRestraints->setPlaceholderText(tr("0.33 0.66 ..."));
+    m_lineTrussRestraints->setToolTip(
+        tr("Makas üzerinde yanal tutuluş / bağlantı noktaları x/L oranı. Boşluk, virgül veya noktalı virgül kabul edilir; "
+           "örn. 0.33 0.66"));
+    auto *lblTrussRest = new QLabel(tr("Makas tutuluş x/L"), ui->scrollAreaWidgetContents);
+    lblTrussRest->setToolTip(m_lineTrussRestraints->toolTip());
+    ui->formLayout->addRow(lblTrussRest, m_lineTrussRestraints);
+
     m_comboColumnBase = new QComboBox(ui->scrollAreaWidgetContents);
     m_comboColumnBase->addItem(tr("Ankastre (fixed)"), static_cast<int>(ColumnBaseSupport::Fixed));
     m_comboColumnBase->addItem(tr("Mafsallı (pinned)"), static_cast<int>(ColumnBaseSupport::Pinned));
@@ -159,17 +312,17 @@ MainWindow::MainWindow(QWidget *parent)
     ui->formLayout->insertRow(5, lblColBase, m_comboColumnBase);
 
     m_lineColumnZzBuckling = new QLineEdit(ui->scrollAreaWidgetContents);
-    m_lineColumnZzBuckling->setPlaceholderText(tr("e.g. 0.33, 0.66"));
+    m_lineColumnZzBuckling->setPlaceholderText(tr("0.33 0.66 ..."));
     m_lineColumnZzBuckling->setToolTip(
-        tr("Z-z eksenel burkulma (Euler Iz) için tutuluş h/H (0..1), virgülle.\n"
+        tr("Z-z eksenel burkulma (Euler Iz) için tutuluş h/H (0..1). Boşluk, virgül veya noktalı virgül kabul edilir.\n"
            "Doluysa yalnızca bu oranlar kullanılır (elle/makas listesi z-z için devre dışı).\n"
            "Boşsa: «Lateral brace h/H» + isteğe bağlı makas geometrisi birleşimi kullanılır."));
     auto *lblZzBuck = new QLabel(tr("Z-z buckling brace h/H"), ui->scrollAreaWidgetContents);
     lblZzBuck->setToolTip(m_lineColumnZzBuckling->toolTip());
-    ui->formLayout->insertRow(24, lblZzBuck, m_lineColumnZzBuckling);
+    ui->formLayout->insertRow(25, lblZzBuck, m_lineColumnZzBuckling);
 
     m_lineColumnLtbBottom = new QLineEdit(ui->scrollAreaWidgetContents);
-    m_lineColumnLtbBottom->setPlaceholderText(tr("e.g. 0.5"));
+    m_lineColumnLtbBottom->setPlaceholderText(tr("0.5"));
     m_lineColumnLtbBottom->setToolTip(
         tr("LTB: alt başlık (flanş) yanal tutuluş h/H — Mcr ve χ_LT (güçlü eksen eğilme)."));
     auto *lblLtbB = new QLabel(tr("LTB alt başlık h/H"), ui->scrollAreaWidgetContents);
@@ -177,13 +330,13 @@ MainWindow::MainWindow(QWidget *parent)
     ui->formLayout->insertRow(25, lblLtbB, m_lineColumnLtbBottom);
 
     m_lineColumnLtbTop = new QLineEdit(ui->scrollAreaWidgetContents);
-    m_lineColumnLtbTop->setPlaceholderText(tr("e.g. 0.5"));
+    m_lineColumnLtbTop->setPlaceholderText(tr("0.5"));
     m_lineColumnLtbTop->setToolTip(
         tr("LTB: üst başlık yanal tutuluş h/H — Mcr ve χ_LT.\n"
            "Alt ve üst doluysa Mcr ≈ min(Mcr alt, Mcr üst) (muhafazakâr)."));
     auto *lblLtbT = new QLabel(tr("LTB üst başlık h/H"), ui->scrollAreaWidgetContents);
     lblLtbT->setToolTip(m_lineColumnLtbTop->toolTip());
-    ui->formLayout->insertRow(26, lblLtbT, m_lineColumnLtbTop);
+    ui->formLayout->insertRow(27, lblLtbT, m_lineColumnLtbTop);
 
     m_comboColumnLtbCurve = new QComboBox(ui->scrollAreaWidgetContents);
     m_comboColumnLtbCurve->addItems({QStringLiteral("A0 (α=0,13)"), QStringLiteral("A (0,21)"),
@@ -193,7 +346,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_comboColumnLtbCurve->setToolTip(tr("LTB χ_LT için imperfection eğrisi (Tablo 6.3 yaklaşımı)."));
     auto *lblLtbCurve = new QLabel(tr("LTB χ curve"), ui->scrollAreaWidgetContents);
     lblLtbCurve->setToolTip(m_comboColumnLtbCurve->toolTip());
-    ui->formLayout->insertRow(27, lblLtbCurve, m_comboColumnLtbCurve);
+    ui->formLayout->insertRow(28, lblLtbCurve, m_comboColumnLtbCurve);
 
     const QStringList bucklingCurves = {QStringLiteral("A0 (α=0,13)"), QStringLiteral("A (0,21)"),
                                         QStringLiteral("B (0,34)"), QStringLiteral("C (0,49)"),
@@ -202,6 +355,10 @@ MainWindow::MainWindow(QWidget *parent)
     ui->combo_trussBucklingCurve->addItems(bucklingCurves);
     ui->combo_colBucklingCurve->setCurrentIndex(2);
     ui->combo_trussBucklingCurve->setCurrentIndex(2);
+    ui->line_colBraceHeights->setPlaceholderText(tr("0.33 0.66 ..."));
+    ui->line_colBraceHeights->setToolTip(
+        tr("İsteğe bağlı kolon yanal tutuluş h/H oranları. Boşluk, virgül veya noktalı virgül kabul edilir; "
+           "örn. 0.33 0.66."));
 
     m_scene = new QGraphicsScene(this);
     ui->graphicsView->setScene(m_scene);
@@ -217,7 +374,10 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->spin_columnHeight, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
     connect(ui->spin_panels, qOverload<int>(&QSpinBox::valueChanged), this, [this](int) { setupScene(); });
     connect(ui->spin_trussAxisY, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
+    connect(ui->spin_trussAxisY, &QDoubleSpinBox::editingFinished, this, [this]() { setupScene(); });
     connect(ui->spin_area, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
+    connect(ui->spin_inertia, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
+    connect(ui->spin_E, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
     connect(ui->spin_purlinClad, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
     connect(ui->spin_dl2, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
     connect(ui->spin_sk, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
@@ -238,6 +398,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_comboColumnLtbCurve, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) { setupScene(); });
     connect(ui->combo_columnFamily, qOverload<int>(&QComboBox::currentIndexChanged), this,
             [this](int) { setupScene(); });
+    connect(m_comboTrussSectionForm, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int) { setupScene(); });
+    connect(m_lineTrussRestraints, &QLineEdit::editingFinished, this, [this]() { setupScene(); });
     connect(m_comboColumnBase, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) { setupScene(); });
     connect(ui->spin_fy, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { setupScene(); });
 
@@ -254,17 +417,38 @@ MainWindow::~MainWindow()
 void MainWindow::setupScene()
 {
     PortalFrameInput in = collectInput();
+    ui->spin_panels->setEnabled(in.trussMemberSectionForm != 3);
+    ui->label_asikLineValue->setText(
+        QString::number(PortalSolver::roofPurlinDeadSurface_kN_per_m2() * std::max(in.trussAxisSpacingY_m, 1e-12),
+                        'f', 3));
     ui->spin_apexHeight->blockSignals(true);
     ui->spin_apexHeight->setValue(in.apexHeight_m);
     ui->spin_apexHeight->blockSignals(false);
 
-    PortalFrameResult preview;
-    PortalSolver::buildPortalGeometry(in, preview);
-    drawFrameFromResult(preview, in);
+    const bool useLastOsGeometry =
+        m_lastSuccessfulResult.has_value() && m_lastSuccessfulResult->ok && !m_lastSuccessfulResult->nodes.empty()
+        && m_inputAtLastSuccessfulAnalyze.has_value()
+        && sameLoadAndSteelInputsForDesign(in, *m_inputAtLastSuccessfulAnalyze);
+    if (useLastOsGeometry) {
+        drawFrameFromResult(*m_lastSuccessfulResult, in);
+    } else {
+        PortalFrameResult preview;
+        PortalSolver::buildPortalGeometry(in, preview);
+        drawFrameFromResult(preview, in);
+    }
+
+    if (!m_busy && m_inputAtLastSuccessfulAnalyze.has_value()
+        && !sameLoadAndSteelInputsForDesign(in, *m_inputAtLastSuccessfulAnalyze)) {
+        ui->label_status->setText(
+            tr("Önizleme: Y veya yük son Hesapla’dan farklı — sahnedeki qd,çatı/wd formdan; OpenSees kuvvetleri "
+               "için Hesapla’ya basın."));
+    }
 }
 
-PortalFrameInput MainWindow::collectInput() const
+PortalFrameInput MainWindow::collectInput()
 {
+    commitAllSpinBoxEdits(this);
+
     PortalFrameInput in;
     in.spanWidth_m = ui->spin_span->value();
     in.columnHeight_m = ui->spin_columnHeight->value();
@@ -279,6 +463,7 @@ PortalFrameInput MainWindow::collectInput() const
     in.sk_kN_per_m2 = ui->spin_sk->value();
     in.wl_kN_per_m2 = ui->spin_wl->value();
     in.columnFamilyIndex = ui->combo_columnFamily->currentIndex();
+    in.trussMemberSectionForm = m_comboTrussSectionForm ? m_comboTrussSectionForm->currentIndex() : 0;
     in.columnBaseSupport =
         static_cast<ColumnBaseSupport>(m_comboColumnBase->currentData().toInt());
     in.columnLtbCurveOrdinal = m_comboColumnLtbCurve ? m_comboColumnLtbCurve->currentIndex() : 2;
@@ -288,10 +473,25 @@ PortalFrameInput MainWindow::collectInput() const
         if (t.isEmpty()) {
             return;
         }
-        const QStringList parts = t.split(QLatin1Char(','), Qt::SkipEmptyParts);
-        for (const QString &p : parts) {
+        const QRegularExpression numberRe(QStringLiteral("[-+]?(?:\\d+(?:[\\.,]\\d+)?|[\\.,]\\d+)"));
+        auto it = numberRe.globalMatch(t);
+        while (it.hasNext()) {
+            const QString p = it.next().captured(0).trimmed();
             bool ok = false;
-            const double v = p.trimmed().toDouble(&ok);
+            double v = QLocale().toDouble(p, &ok);
+            if (!ok) {
+                v = QLocale::c().toDouble(p, &ok);
+            }
+            if (!ok) {
+                QString normalized = p;
+                normalized.replace(QLatin1Char(','), QLatin1Char('.'));
+                if (normalized.startsWith(QLatin1Char('.'))) {
+                    normalized.prepend(QLatin1Char('0'));
+                } else if (normalized.startsWith(QStringLiteral("-."))) {
+                    normalized.insert(1, QLatin1Char('0'));
+                }
+                v = normalized.toDouble(&ok);
+            }
             if (ok && v > 1e-6 && v < 1.0 - 1e-6) {
                 out->push_back(v);
             }
@@ -305,6 +505,7 @@ PortalFrameInput MainWindow::collectInput() const
                   &in.columnLtbBottomFlangeBraceHeightFractions);
     parseFracList(m_lineColumnLtbTop ? m_lineColumnLtbTop->text() : QString(),
                   &in.columnLtbTopFlangeBraceHeightFractions);
+    parseFracList(m_lineTrussRestraints ? m_lineTrussRestraints->text() : QString(), &in.trussRestraintFractions);
     in.fy_MPa = ui->spin_fy->value();
     in.columnBucklingKy = ui->spin_colBucklingKy->value();
     in.columnBucklingKz = ui->spin_colBucklingKz->value();
@@ -312,27 +513,30 @@ PortalFrameInput MainWindow::collectInput() const
     in.trussBucklingCurveOrdinal = ui->combo_trussBucklingCurve->currentIndex();
     in.columnLateralBraceFromTrussGeometry = ui->check_colBraceFromTruss->isChecked();
     in.columnLateralBraceHeightFractions.clear();
-    const QString braceTxt = ui->line_colBraceHeights->text().trimmed();
-    if (!braceTxt.isEmpty()) {
-        const QStringList parts = braceTxt.split(QLatin1Char(','), Qt::SkipEmptyParts);
-        for (const QString &p : parts) {
-            bool ok = false;
-            const double v = p.trimmed().toDouble(&ok);
-            if (ok && v > 1e-6 && v < 1.0 - 1e-6) {
-                in.columnLateralBraceHeightFractions.push_back(v);
-            }
-        }
-        std::sort(in.columnLateralBraceHeightFractions.begin(), in.columnLateralBraceHeightFractions.end());
-        in.columnLateralBraceHeightFractions.erase(
-            std::unique(in.columnLateralBraceHeightFractions.begin(), in.columnLateralBraceHeightFractions.end()),
-            in.columnLateralBraceHeightFractions.end());
-    }
+    parseFracList(ui->line_colBraceHeights->text(), &in.columnLateralBraceHeightFractions);
     return in;
+}
+
+void MainWindow::updateCharLineLoadsReadout(const PortalFrameInput &in)
+{
+    const auto ch = in.lineLoadsCharacteristic();
+    const double gk = ch.dl1 + ch.dl2;
+    ui->label_char_line_loads->setText(
+        tr("Karakteristik (Y=%1 m, çelik taban Yref=%2 m): dl1=%3, DL2=%4, sn=%5, wl=%6 kN/m — gk=%7. "
+           "dl1’deki tüm bileşenler ×Y; makas çeliği yoğunluğu W·Yref üzerinden hesaplanır.")
+            .arg(in.trussAxisSpacingY_m, 0, 'f', 3)
+            .arg(PortalSolver::trussSteelDeadTributaryReferenceY_m, 0, 'f', 2)
+            .arg(ch.dl1, 0, 'f', 3)
+            .arg(ch.dl2, 0, 'f', 3)
+            .arg(ch.sn, 0, 'f', 3)
+            .arg(ch.wl, 0, 'f', 3)
+            .arg(gk, 0, 'f', 3));
 }
 
 void MainWindow::drawFrameFromResult(const PortalFrameResult &result, const PortalFrameInput &input)
 {
     ui->label_trussDeadAuto->setText(QString::number(PortalSolver::trussSelfWeightHoriz_kN_per_m2(input), 'f', 3));
+    updateCharLineLoadsReadout(input);
     m_scene->clear();
 
     if (result.nodes.empty()) {
@@ -402,10 +606,14 @@ void MainWindow::drawFrameFromResult(const PortalFrameResult &result, const Port
         qdRoof = std::max(qdRoof, co.q_roof_design_kN_m);
         wdCol = std::max(wdCol, co.w_column_design_kN_m);
     }
+    const bool reuseOsEnvelopeDesign =
+        result.ok && m_inputAtLastSuccessfulAnalyze.has_value()
+        && sameLoadAndSteelInputsForDesign(input, *m_inputAtLastSuccessfulAnalyze);
     const SectionOptimizationResult opt =
-        result.ok ? result.sectionDesign
-                  : optimizeSections(input, qdRoof, wdCol, input.fy_MPa,
-                                     static_cast<ColumnFamily>(input.columnFamilyIndex));
+        reuseOsEnvelopeDesign
+            ? result.sectionDesign
+            : optimizeSections(input, qdRoof, wdCol, input.fy_MPa,
+                               static_cast<ColumnFamily>(input.columnFamilyIndex), nullptr);
 
     for (const auto &m : result.members) {
         double x1 = 0.0;
@@ -420,7 +628,9 @@ void MainWindow::drawFrameFromResult(const PortalFrameResult &result, const Port
         const QLineF line(p1, p2);
 
         QPen penUse = columnPen;
-        if (m.isTruss) {
+        if (m.trussRole == TrussMemberRole::RafterBeam) {
+            penUse = QPen(QColor(12, 110, 70), 3.1);
+        } else if (m.isTruss) {
             switch (m.trussRole) {
             case TrussMemberRole::ChordBottom:
                 penUse = penChordBottom;
@@ -463,8 +673,9 @@ void MainWindow::drawFrameFromResult(const PortalFrameResult &result, const Port
 
         /** Alt/üst başlık tek 2×L kesiti — küçük segment etiketi yok; döngüden sonra tek büyük etiket. */
         const bool skipSmallChordLabel =
-            m.isTruss
-            && (m.trussRole == TrussMemberRole::ChordBottom || m.trussRole == TrussMemberRole::ChordTop);
+            (m.isTruss
+             && (m.trussRole == TrussMemberRole::ChordBottom || m.trussRole == TrussMemberRole::ChordTop))
+            || (m.trussRole == TrussMemberRole::RafterBeam);
 
         const QString pLbl = memberProfileLabel(m, opt);
         if (!skipSmallChordLabel && !pLbl.isEmpty() && pLbl != QStringLiteral("—")) {
@@ -582,12 +793,88 @@ void MainWindow::drawFrameFromResult(const PortalFrameResult &result, const Port
         ti->setZValue(6);
     };
 
-    addChordGroupLabelFiltered(TrussMemberRole::ChordBottom, opt.trussBottomChord2xL,
-                               [](double, double) { return true; }, std::nullopt);
-    addChordGroupLabelFiltered(TrussMemberRole::ChordTop, opt.trussTopChord2xL,
-                               [ridgeX](double mx, double) { return mx < ridgeX; }, true);
-    addChordGroupLabelFiltered(TrussMemberRole::ChordTop, opt.trussTopChord2xL,
-                               [ridgeX](double mx, double) { return mx >= ridgeX; }, false);
+    if (input.trussMemberSectionForm == 3) {
+        auto addMahyaChordLabel = [&](const std::function<bool(double mx, double my)> &useSeg, bool leftHalf) {
+            const QString t = stripProfileSuffix(opt.rafterBeamProfile);
+            if (t.isEmpty() || t == QStringLiteral("—")) {
+                return;
+            }
+            QPointF sumMid(0.0, 0.0);
+            double sumDx = 0.0;
+            double sumDy = 0.0;
+            int nSeg = 0;
+            for (const auto &mm : result.members) {
+                if (mm.trussRole != TrussMemberRole::RafterBeam) {
+                    continue;
+                }
+                double xa = 0.0;
+                double ya = 0.0;
+                double xb = 0.0;
+                double yb = 0.0;
+                if (!nodeXY(mm.nodeI, xa, ya) || !nodeXY(mm.nodeJ, xb, yb)) {
+                    continue;
+                }
+                const double mx = 0.5 * (xa + xb);
+                const double my = 0.5 * (ya + yb);
+                if (!useSeg(mx, my)) {
+                    continue;
+                }
+                const QPointF pa = scenePoint(xa, ya, scale, originX, originY);
+                const QPointF pb = scenePoint(xb, yb, scale, originX, originY);
+                sumMid += (pa + pb) * 0.5;
+                sumDx += (pb.x() - pa.x());
+                sumDy += (pb.y() - pa.y());
+                ++nSeg;
+            }
+            if (nSeg <= 0) {
+                return;
+            }
+            QPointF pos = sumMid / static_cast<double>(nSeg);
+            const double len = std::hypot(sumDx, sumDy);
+            QPointF perp(0.0, 0.0);
+            if (len > 1e-6) {
+                perp = QPointF(-sumDy / len, sumDx / len);
+            }
+            if (len > 1e-6) {
+                if (leftHalf) {
+                    if (perp.x() > 0.0) {
+                        perp = -perp;
+                    }
+                } else {
+                    if (perp.x() < 0.0) {
+                        perp = -perp;
+                    }
+                }
+            }
+            pos += perp * kChordOffPx;
+            constexpr int kChordLabelPt = 10;
+            auto *ti = m_scene->addSimpleText(t, QFont(QStringLiteral("Segoe UI"), kChordLabelPt, QFont::DemiBold));
+            ti->setBrush(QColor(18, 18, 18));
+            const QRectF tb = ti->boundingRect();
+            ti->setTransformOriginPoint(tb.center());
+            ti->setPos(pos.x() - 0.5 * tb.width(), pos.y() - 0.5 * tb.height());
+            double deg = 0.0;
+            if (len > 1e-6) {
+                deg = std::atan2(sumDy, sumDx) * 180.0 / 3.14159265358979323846;
+                if (deg > 90.0) {
+                    deg -= 180.0;
+                } else if (deg < -90.0) {
+                    deg += 180.0;
+                }
+            }
+            ti->setRotation(deg);
+            ti->setZValue(6);
+        };
+        addMahyaChordLabel([ridgeX](double mx, double) { return mx < ridgeX; }, true);
+        addMahyaChordLabel([ridgeX](double mx, double) { return mx >= ridgeX; }, false);
+    } else {
+        addChordGroupLabelFiltered(TrussMemberRole::ChordBottom, opt.trussBottomChord2xL,
+                                   [](double, double) { return true; }, std::nullopt);
+        addChordGroupLabelFiltered(TrussMemberRole::ChordTop, opt.trussTopChord2xL,
+                                   [ridgeX](double mx, double) { return mx < ridgeX; }, true);
+        addChordGroupLabelFiltered(TrussMemberRole::ChordTop, opt.trussTopChord2xL,
+                                   [ridgeX](double mx, double) { return mx >= ridgeX; }, false);
+    }
 
     const double nodeR = std::max(2.0, scale * 0.08);
     for (const auto &n : result.nodes) {
@@ -602,9 +889,159 @@ void MainWindow::drawFrameFromResult(const PortalFrameResult &result, const Port
     const double halfW = 0.5 * W;
     const double Ha = PortalSolver::trussApexHeight_m(input);
 
+    auto addMarkedPoint = [&](double x, double y, const QColor &color, const QString &label, bool square) {
+        const QPointF c = scenePoint(x, y, scale, originX, originY);
+        constexpr double r = 6.0;
+        QPen pen(color.darker(135), 1.4);
+        QBrush brush(color);
+        QGraphicsItem *item = nullptr;
+        if (square) {
+            item = m_scene->addRect(c.x() - r, c.y() - r, 2.0 * r, 2.0 * r, pen, brush);
+        } else {
+            item = m_scene->addEllipse(c.x() - r, c.y() - r, 2.0 * r, 2.0 * r, pen, brush);
+        }
+        item->setZValue(8);
+        if (!label.isEmpty()) {
+            auto *txt = m_scene->addSimpleText(label, QFont(QStringLiteral("Segoe UI"), 7, QFont::DemiBold));
+            txt->setBrush(color.darker(170));
+            txt->setPos(c.x() + r + 3.0, c.y() - r - 2.0);
+            txt->setZValue(9);
+        }
+    };
+
+    auto isGussetFootNode = [&](int tag) {
+        for (const auto &m : result.members) {
+            if (!m.isTruss || m.trussRole != TrussMemberRole::GussetStrip) {
+                continue;
+            }
+            double xi = 0.0;
+            double yi = 0.0;
+            double xj = 0.0;
+            double yj = 0.0;
+            if (!nodeXY(m.nodeI, xi, yi) || !nodeXY(m.nodeJ, xj, yj)) {
+                continue;
+            }
+            const int footTag = (yi < yj) ? m.nodeI : m.nodeJ;
+            if (footTag == tag) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const QColor supportRed(220, 40, 40);
+    std::vector<int> markedSupportTags;
+    auto markSupportNode = [&](const NodeResult &n, const QString &label) {
+        if (std::find(markedSupportTags.begin(), markedSupportTags.end(), n.tag) != markedSupportTags.end()) {
+            return;
+        }
+        markedSupportTags.push_back(n.tag);
+        addMarkedPoint(n.x, n.y, supportRed, label, true);
+    };
+    for (const auto &n : result.nodes) {
+        const bool baseSupport =
+            std::abs(n.y) < 1e-9 && (std::abs(n.x) < 1e-9 || std::abs(n.x - W) < 1e-9);
+        if (baseSupport || isGussetFootNode(n.tag)) {
+            markSupportNode(n, QStringLiteral("tutulu"));
+        }
+    }
+    for (const auto &m : result.members) {
+        const bool trussBoundaryJoint =
+            m.isTruss
+            && (m.trussRole == TrussMemberRole::ChordTop || m.trussRole == TrussMemberRole::ChordBottom
+                || m.trussRole == TrussMemberRole::GussetStrip);
+        if (!trussBoundaryJoint) {
+            continue;
+        }
+        for (int tag : {m.nodeI, m.nodeJ}) {
+            double x = 0.0;
+            double y = 0.0;
+            if (!nodeXY(tag, x, y)) {
+                continue;
+            }
+            const bool onColumn = std::abs(x) < 1e-9 || std::abs(x - W) < 1e-9;
+            const bool gussetConnection = m.trussRole == TrussMemberRole::GussetStrip;
+            if ((!onColumn && !gussetConnection) || y <= 1e-9) {
+                continue;
+            }
+            for (const auto &n : result.nodes) {
+                if (n.tag == tag) {
+                    markSupportNode(n, QStringLiteral("makas tutulu"));
+                    break;
+                }
+            }
+        }
+    }
+    auto roofYAtX = [&](double x) {
+        if (x <= 0.5 * W) {
+            const double s = (0.5 * W > 1e-9) ? (x / (0.5 * W)) : 0.0;
+            return Hc + s * (Ha - Hc);
+        }
+        const double s = (0.5 * W > 1e-9) ? ((W - x) / (0.5 * W)) : 0.0;
+        return Hc + s * (Ha - Hc);
+    };
+    bool labeledManualTrussSupport = false;
+    for (double f : input.trussRestraintFractions) {
+        if (f <= 1e-6 || f >= 1.0 - 1e-6) {
+            continue;
+        }
+        const double x = f * W;
+        const QString label = labeledManualTrussSupport ? QString() : QStringLiteral("makas tutulu");
+        addMarkedPoint(x, roofYAtX(x), supportRed, label, true);
+        if (input.trussMemberSectionForm != 3) {
+            addMarkedPoint(x, Hc - W / 40.0, supportRed, QString(), true);
+        }
+        labeledManualTrussSupport = true;
+    }
+
+    std::vector<double> bucklingFractions;
+    if (!input.columnZzBucklingBraceHeightFractions.empty()) {
+        bucklingFractions = input.columnZzBucklingBraceHeightFractions;
+    } else {
+        bucklingFractions = PortalSolver::columnLateralBraceHeightFractionsEffective(input);
+    }
+    bucklingFractions.erase(
+        std::remove_if(bucklingFractions.begin(), bucklingFractions.end(),
+                       [](double f) { return f <= 1e-6 || f >= 1.0 - 1e-6; }),
+        bucklingFractions.end());
+    std::sort(bucklingFractions.begin(), bucklingFractions.end());
+    bucklingFractions.erase(std::unique(bucklingFractions.begin(), bucklingFractions.end()),
+                            bucklingFractions.end());
+    const QColor bucklingGreen(20, 170, 70);
+    for (double f : bucklingFractions) {
+        const double y = f * Hc;
+        addMarkedPoint(0.0, y, bucklingGreen, QStringLiteral("buckling"), false);
+        addMarkedPoint(W, y, bucklingGreen, QString(), false);
+    }
+    std::vector<int> markedTrussBucklingTags;
+    bool labeledTrussBuckling = false;
+    for (const auto &m : result.members) {
+        if (!m.isTruss) {
+            continue;
+        }
+        for (int tag : {m.nodeI, m.nodeJ}) {
+            if (std::find(markedTrussBucklingTags.begin(), markedTrussBucklingTags.end(), tag)
+                != markedTrussBucklingTags.end()) {
+                continue;
+            }
+            double x = 0.0;
+            double y = 0.0;
+            if (!nodeXY(tag, x, y)) {
+                continue;
+            }
+            markedTrussBucklingTags.push_back(tag);
+            addMarkedPoint(x, y, bucklingGreen,
+                           labeledTrussBuckling ? QString() : QStringLiteral("makas buckling"), false);
+            labeledTrussBuckling = true;
+        }
+    }
+
     // TS 498: roof — uniform vertical line load (dead + snow) along each main roof slope (global düşey gösterim).
     // Üst hat kolon seviyesinde (Hc) başlar.
-    const double structVert = std::max(0.2, std::min(0.45, (Ha - Hc) * 0.12 + 0.15));
+    const double structVertBase = std::max(0.2, std::min(0.45, (Ha - Hc) * 0.12 + 0.15));
+    /** qdRoof Y ve yüklerle değişir; ok uzunluğu hafif ölçeklenir (sabit ok = «Y etkisiz» algısı). */
+    const double structVert =
+        structVertBase * std::clamp(0.72 + 0.022 * std::max(qdRoof, 0.0), 0.65, 1.65);
     const int nRoof = 9;
     const QColor roofLoadCol(180, 30, 30);
     drawVerticalDistributedOnSegment(m_scene, 0.0, Hc, halfW, Ha, nRoof, scale, originX, originY, roofLoadCol,
@@ -612,7 +1049,7 @@ void MainWindow::drawFrameFromResult(const PortalFrameResult &result, const Port
     drawVerticalDistributedOnSegment(m_scene, halfW, Ha, W, Hc, nRoof, scale, originX, originY, roofLoadCol,
                                      structVert);
 
-    auto *roofLbl = m_scene->addText(QStringLiteral("qd,çatı = %1 kN/m (STR)").arg(qdRoof, 0, 'f', 2));
+    auto *roofLbl = m_scene->addText(QStringLiteral("qd,çatı = %1 kN/m (STR)").arg(qdRoof, 0, 'f', 3));
     roofLbl->setDefaultTextColor(roofLoadCol);
     roofLbl->setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::Bold));
     roofLbl->setPos(scenePoint(halfW, Ha, scale, originX, originY).x() - 40.0,
@@ -620,14 +1057,15 @@ void MainWindow::drawFrameFromResult(const PortalFrameResult &result, const Port
     roofLbl->setZValue(4);
 
     // TS 498: wind — uniform horizontal line load along each column height.
-    const double structHorz = std::max(0.25, std::min(0.5, Hc * 0.08));
+    const double structHorzBase = std::max(0.25, std::min(0.5, Hc * 0.08));
+    const double structHorz = structHorzBase * std::clamp(0.72 + 0.028 * std::max(wdCol, 0.0), 0.65, 1.65);
     const int nCol = 7;
     const QColor windCol(0, 90, 150);
     drawHorizontalDistributedOnColumn(m_scene, 0.0, 0.0, Hc, nCol, scale, originX, originY, windCol, structHorz,
                                       true);
     drawHorizontalDistributedOnColumn(m_scene, W, 0.0, Hc, nCol, scale, originX, originY, windCol, structHorz, false);
 
-    auto *windLbl = m_scene->addText(QStringLiteral("wd,kol = %1 kN/m (STR)").arg(wdCol, 0, 'f', 2));
+    auto *windLbl = m_scene->addText(QStringLiteral("wd,kol = %1 kN/m (STR)").arg(wdCol, 0, 'f', 3));
     windLbl->setDefaultTextColor(windCol);
     windLbl->setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::Bold));
     windLbl->setPos(scenePoint(0.0, 0.55 * Hc, scale, originX, originY).x() - 10.0,
@@ -648,12 +1086,20 @@ void MainWindow::onCalculateClicked()
     ui->push_calculate->setEnabled(false);
     m_busy = true;
 
-    const PortalFrameInput input = collectInput();
-    QFuture<PortalFrameResult> fut = QtConcurrent::run([input]() {
-        PortalSolver solver;
-        return solver.analyze(input);
+    /** Bir olay döngüsü ertesi: düğmeye tıklanınca spin odak kaybı + satır metni tam işlensin. */
+    QPointer<MainWindow> self(this);
+    QTimer::singleShot(0, this, [this, self]() {
+        if (!self) {
+            return;
+        }
+        m_inputQueuedForLastAnalyzeSubmit = collectInput();
+        const PortalFrameInput input = m_inputQueuedForLastAnalyzeSubmit;
+        QFuture<PortalFrameResult> fut = QtConcurrent::run([input]() {
+            PortalSolver solver;
+            return solver.analyze(input);
+        });
+        m_watcher.setFuture(fut);
     });
-    m_watcher.setFuture(fut);
 }
 
 void MainWindow::onAnalysisFinished()
@@ -663,6 +1109,7 @@ void MainWindow::onAnalysisFinished()
 
     const PortalFrameResult r = m_watcher.future().result();
     if (!r.ok) {
+        m_lastSuccessfulResult.reset();
         ui->text_result_opensees->setPlainText(r.errorMessage);
         ui->label_status->setText(tr("Hata — ayrıntı altta OpenSees alanında."));
         QMessageBox::warning(this, tr("Analysis"), r.errorMessage);
@@ -670,8 +1117,16 @@ void MainWindow::onAnalysisFinished()
     }
 
     ui->text_result_opensees->setPlainText(r.errorMessage);
+    m_lastSuccessfulResult = r;
+    m_inputAtLastSuccessfulAnalyze = m_inputQueuedForLastAnalyzeSubmit;
     ui->label_status->setText(tr("Tamam — OpenSees özeti altta."));
-    drawFrameFromResult(r, collectInput());
+    /** `r` bu kuyruktaki girişle üretildi; çizim/yeniden boyutlandırma `collectInput()` sapmasın diye aynı snapshot. */
+    drawFrameFromResult(r, m_inputQueuedForLastAnalyzeSubmit);
+    if (!sameLoadAndSteelInputsForDesign(collectInput(), m_inputQueuedForLastAnalyzeSubmit)) {
+        ui->label_status->setText(
+            tr("Tamam — form, Hesapla anındaki girişten farklı görünüyor; tutarlı kuvvet için değerleri eşitleyip "
+               "tekrar Hesapla."));
+    }
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event)

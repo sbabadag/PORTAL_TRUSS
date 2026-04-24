@@ -155,7 +155,7 @@
               <string>Makas aks aralığı Y (m)</string>
              </property>
              <property name="toolTip">
-              <string>Plan yönünde yan yana makas aksları arası mesafe (tributary). Çatı/kolon kN/m² × bu değer = yayılı kN/m.</string>
+              <string>Plan Y’de tributary genişlik [m]. Makas çeliği, aşık, ek ölü, DL2, kar ve kol rüzgârı hat yükleri bu Y ile ölçeklenir (çelik yoğunluğu tabanı W·Yref, Yref=7,65 m).</string>
              </property>
             </widget>
            </item>
@@ -370,10 +370,10 @@
            <item row="15" column="0">
             <widget class="QLabel" name="label_purlinClad">
              <property name="text">
-              <string>Aşık + kaplama, kN/m²</string>
+              <string>Ek çatı ölü (kaplama vb.), kN/m²</string>
              </property>
              <property name="toolTip">
-              <string>Çatı aşığı ve kaplama ölü yükü (yatay izdüşüm); makas çeliği üstte otomatik eklenir.</string>
+              <string>7 kg/m² aşık ölü yükü otomatik eklenir; bu kutu yalnızca ek kaplama/yalıtım vb. (kN/m² yatay izdüşüm). Çatı çizgisi kN/m = (aşık+ek+makas çeliği/m²)×Y.</string>
              </property>
             </widget>
            </item>
@@ -389,11 +389,31 @@
               <double>100000.000000000000000</double>
              </property>
              <property name="value">
-              <double>0.150000000000000</double>
+              <double>0.050000000000000</double>
              </property>
             </widget>
            </item>
            <item row="16" column="0">
+            <widget class="QLabel" name="label_asikLineAuto">
+             <property name="text">
+              <string>Aşık 7 kg/m² → çizgi yük (kN/m)</string>
+             </property>
+             <property name="toolTip">
+              <string>7 kg/m² yatay izdüşüm × g × makas aks aralığı Y; çatı hattı ölü yükünün aşık bileşeni (kN/m). Makas çeliği ve ek ölü ayrı.</string>
+             </property>
+            </widget>
+           </item>
+           <item row="16" column="1">
+            <widget class="QLabel" name="label_asikLineValue">
+             <property name="text">
+              <string>—</string>
+             </property>
+             <property name="alignment">
+              <set>Qt::AlignRight|Qt::AlignVCenter</set>
+             </property>
+            </widget>
+           </item>
+           <item row="17" column="0">
             <widget class="QLabel" name="label_dl2">
              <property name="text">
               <string>DL2 (ölü 2)</string>
@@ -403,7 +423,7 @@
              </property>
             </widget>
            </item>
-           <item row="16" column="1">
+           <item row="17" column="1">
             <widget class="QDoubleSpinBox" name="spin_dl2">
              <property name="decimals">
               <number>3</number>
@@ -419,7 +439,7 @@
              </property>
             </widget>
            </item>
-           <item row="17" column="0">
+           <item row="18" column="0">
             <widget class="QLabel" name="label_wl">
              <property name="text">
               <string>WL (rüzgar, kol)</string>
@@ -429,7 +449,7 @@
              </property>
             </widget>
            </item>
-           <item row="17" column="1">
+           <item row="18" column="1">
             <widget class="QDoubleSpinBox" name="spin_wl">
              <property name="decimals">
               <number>3</number>
@@ -445,7 +465,7 @@
              </property>
             </widget>
            </item>
-           <item row="18" column="0">
+           <item row="19" column="0">
             <widget class="QLabel" name="label_colBucklingKy">
              <property name="text">
               <string>Column Ky (y-y)</string>
@@ -455,7 +475,7 @@
              </property>
             </widget>
            </item>
-           <item row="18" column="1">
+           <item row="19" column="1">
             <widget class="QDoubleSpinBox" name="spin_colBucklingKy">
              <property name="decimals">
               <number>2</number>
@@ -471,7 +491,7 @@
              </property>
             </widget>
            </item>
-           <item row="19" column="0">
+           <item row="20" column="0">
             <widget class="QLabel" name="label_colBucklingKz">
              <property name="text">
               <string>Column Kz (z-z)</string>
@@ -481,7 +501,7 @@
              </property>
             </widget>
            </item>
-           <item row="19" column="1">
+           <item row="20" column="1">
             <widget class="QDoubleSpinBox" name="spin_colBucklingKz">
              <property name="decimals">
               <number>2</number>
@@ -497,7 +517,7 @@
              </property>
             </widget>
            </item>
-           <item row="20" column="0">
+           <item row="21" column="0">
             <widget class="QLabel" name="label_colBucklingCurve">
              <property name="text">
               <string>Column χ curve</string>
@@ -507,10 +527,10 @@
              </property>
             </widget>
            </item>
-           <item row="20" column="1">
+           <item row="21" column="1">
             <widget class="QComboBox" name="combo_colBucklingCurve"/>
            </item>
-           <item row="21" column="0">
+           <item row="22" column="0">
             <widget class="QLabel" name="label_trussBucklingCurve">
              <property name="text">
               <string>Truss χ curve</string>
@@ -520,10 +540,10 @@
              </property>
             </widget>
            </item>
-           <item row="21" column="1">
+           <item row="22" column="1">
             <widget class="QComboBox" name="combo_trussBucklingCurve"/>
            </item>
-           <item row="22" column="0">
+           <item row="23" column="0">
             <widget class="QLabel" name="label_colBraceHeights">
              <property name="text">
               <string>Lateral brace h/H</string>
@@ -533,14 +553,14 @@
              </property>
             </widget>
            </item>
-           <item row="22" column="1">
+           <item row="23" column="1">
             <widget class="QLineEdit" name="line_colBraceHeights">
              <property name="placeholderText">
               <string>e.g. 0.5</string>
              </property>
             </widget>
            </item>
-           <item row="23" column="0" colspan="2">
+           <item row="24" column="0" colspan="2">
             <widget class="QCheckBox" name="check_colBraceFromTruss">
              <property name="text">
               <string>Makas alt hattı (+45° gusset) kolon z-z tutuluşu (geometriden)</string>
@@ -553,7 +573,7 @@
              </property>
             </widget>
            </item>
-           <item row="24" column="0" colspan="2">
+           <item row="25" column="0" colspan="2">
             <widget class="QLabel" name="label_buckle_hint">
              <property name="text">
               <string>Buckling: simplified Euler χ; z-z segments use merged brace h/H (optional truss-derived + manual list). Verify Ky/Kz with your basis of design.</string>
@@ -566,10 +586,10 @@
              </property>
             </widget>
            </item>
-           <item row="25" column="0" colspan="2">
+           <item row="26" column="0" colspan="2">
             <widget class="QLabel" name="label_ts498_hint">
              <property name="text">
-              <string>Kar yükü SK yukarıda veri girişidir (TS 498). Makas ölü otomatik; aşık/kaplama elle. STR: γG=1.35 (ölü), 1.50 (kar,rüzgar); deprem ayrı.</string>
+              <string>Kar yükü SK yukarıda veri girişidir (TS 498). Makas ölü otomatik (Y ile; W·Yref tabanı); aşık 7 kg/m²; ek kaplama kutusu. STR: γG=1.35 (ölü), 1.50 (kar,rüzgar); deprem ayrı.</string>
              </property>
              <property name="wordWrap">
               <bool>true</bool>
@@ -683,6 +703,19 @@
              <property name="bottomMargin">
               <number>6</number>
              </property>
+             <item>
+              <widget class="QLabel" name="label_char_line_loads">
+               <property name="wordWrap">
+                <bool>true</bool>
+               </property>
+               <property name="styleSheet">
+                <string notr="true">color: palette(foreground); font-size: 11px;</string>
+               </property>
+               <property name="text">
+                <string>—</string>
+               </property>
+              </widget>
+             </item>
              <item>
               <widget class="QTextEdit" name="text_result_opensees">
                <property name="readOnly">

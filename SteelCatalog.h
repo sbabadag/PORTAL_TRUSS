@@ -58,4 +58,7 @@ const std::vector<DoubleAngleSection> &doubleAngles2L();
 /** Kesit adı katalogda varsa (örn. "2xL 80x80x8"); aşım/trim sonrası eşleşmez. */
 std::optional<DoubleAngleSection> tryGetDoubleAngle2L(QString designation);
 
+/** HEA / HEB / IPE kataloglarında tam ad (örn. "IPE 200"); aşım eki temizlenir. */
+std::optional<RolledISection> tryGetRolledI(QString designation);
+
 } // namespace SteelCatalog

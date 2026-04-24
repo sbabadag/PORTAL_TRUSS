@@ -7,7 +7,7 @@
  * TS 498 "Yapılara Yükler Standardı" — characteristic line loads (no point loads).
  *
  * Roof (çatı / makas üst hat):
- *   Ölü 1 hat yükü (dl1): makas çeliği (otom.) + aşık/kaplama — kN/m² cinsinden birleştirilip × Y.
+ *   Ölü 1 hat yükü (dl1): makas çeliği (otom., W·Yref tabanı) + aşık 7 kg/m² + ek ölü (kN/m²) — hepsi × Y → kN/m.
  *   DL2 — kN/m²; × Y aks aralığı.
  *   Kar: SK (kN/m²) × çatı şekil katsayısı μ=0,8 × Y → hat üzerinde kar yayılısı sn (kN/m).
  *
@@ -21,7 +21,7 @@ namespace TurkishLoads {
 /** Characteristic uniform line loads. */
 struct CharacteristicLineLoadsPerM
 {
-    /** Roof: dead line load 1 — makas otomatik + aşık/kaplama (kN/m along rafter / top chord). */
+    /** Roof: dead line load 1 — makas çeliği (W·Yref tabanı×Y) + aşık 7 kg/m² + ek ölü, hepsi ×Y (kN/m). */
     double dl1{0.0};
     /** Roof: dead component 2 (kN/m). */
     double dl2{0.0};

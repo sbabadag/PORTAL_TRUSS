@@ -69,6 +69,9 @@ void trussMemberAxialArea_m2(const PortalFrameInput &in, const SectionOptimizati
 
     QString prof;
     switch (member.trussRole) {
+    case TrussMemberRole::RafterBeam:
+        prof = sizing->rafterBeamProfile;
+        break;
     case TrussMemberRole::ChordTop:
         prof = sizing->trussTopChord2xL;
         break;
@@ -100,13 +103,16 @@ void trussMemberAxialArea_m2(const PortalFrameInput &in, const SectionOptimizati
         return;
     }
 
-    const auto sec = SteelCatalog::tryGetDoubleAngle2L(prof);
-    if (!sec.has_value()) {
-        *Aout = A_nom;
+    if (const auto da = SteelCatalog::tryGetDoubleAngle2L(prof); da.has_value()) {
+        *Aout = da->A_total_m2;
+        return;
+    }
+    if (const auto ri = SteelCatalog::tryGetRolledI(prof); ri.has_value()) {
+        *Aout = ri->A_m2;
         return;
     }
 
-    *Aout = sec->A_total_m2;
+    *Aout = A_nom;
 }
 
 void roofLineNodalFy_N(const PortalFrameInput &in, const PortalFrameResult &geo, double q_roof_design_kN_per_m,

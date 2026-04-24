@@ -28,15 +28,23 @@ struct PortalFrameInput
     double apexHeight_m{8.0};
     int trussPanelsPerSide{4};
 
-    /** Plan Y yönünde yan yana makas/çerçeve aksları arası mesafe [m] — tributary genişlik. */
+    /**
+     * Plan Y yönünde yan yana makas/çerçeve aksları arası mesafe [m] — tributary genişlik.
+     * Tüm çatı/kolon hat yükleri (makas çeliği dahil) bu Y ile ölçeklenir: yüzey yoğunlukları × Y → kN/m.
+     * Makas çeliği yoğunluğu tabanı `PortalSolver::trussSteelDeadTributaryReferenceY_m` ile W·Yref alınır (Y=Yref’te
+     * önceki W·Y tabanıyla uyumlu çizgi yükü).
+     */
     double trussAxisSpacingY_m{5.0};
 
     double steelArea_m2{0.015};
     double steelInertia_m4{5.0e-4};
     double youngModulus_Pa{200e9};
 
-    /** Aşık + çatı kaplaması — kN/m² (yatay izdüşüm); makas çeliği ayrıca otomatik eklenir. */
-    double purlinCladding_kN_per_m2{0.15};
+    /**
+     * Ek çatı ölü (kaplama, yalıtım vb.) — kN/m² yatay izdüşüm; aşık 7 kg/m² ayrıca otomatik eklenir
+     * (`lineLoadsCharacteristic`).
+     */
+    double purlinCladding_kN_per_m2{0.05};
     /** Çatı ölü 2 — kN/m². */
     double dl2_kN_per_m2{0.2};
     /** Kar düzlem yükü SK — kN/m² (kullanıcı veri girişi, TS 498 / harita); çatı şekil katsayısı μ=0.8 ile çarpılır. */
@@ -81,6 +89,8 @@ struct PortalFrameInput
     std::vector<double> columnLtbBottomFlangeBraceHeightFractions;
     /** LTB: üst başlık yanal tutuluş h/H. Her iki flanş da doluysa Mcr = min(Mcr,alt, Mcr,üst) (muhafazakâr). */
     std::vector<double> columnLtbTopFlangeBraceHeightFractions;
+    /** Makas/mahya üzerinde çizimde gösterilecek yanal tutuluş konumları x/L; örn. "0.33 0.66". */
+    std::vector<double> trussRestraintFractions;
     /** LTB imperfection curve ordinal: 0…4 = A0…D (EN 1993-1-1 Tablo 6.3 için pratik eşleme; varsayılan B). */
     int columnLtbCurveOrdinal{2};
 
@@ -89,6 +99,12 @@ struct PortalFrameInput
 
     /** 0 = HEA, 1 = HEB, 2 = IPE (kolon için en hafif uygun profil seçilir). */
     int columnFamilyIndex{0};
+    /**
+     * Makas çubukları kesit ailesi:
+     * 0 = çift eşit bacak 2×L (mevcut);
+     * 1 = HEA, 2 = HEB, 3 = IPE — tek hadde I (pütrel/çatı hat profili), gruplar ayrı ayrı en hafif uygun profil.
+     */
+    int trussMemberSectionForm{0};
     /** Çelik akma dayanımı (S235 → 235 MPa). */
     double fy_MPa{235.0};
 
@@ -105,7 +121,7 @@ struct NodeResult
     double rz{0.0};
 };
 
-/** Makas çubuğu rolü — çizimde kalınlık / etiket; analizde tüm makas aynı A,I. */
+/** Çubuk rolü — çizimde kalınlık / etiket; analizde makas/kolon/çatı kirişi ayrımı. */
 enum class TrussMemberRole : uint8_t
 {
     Column,
@@ -113,6 +129,8 @@ enum class TrussMemberRole : uint8_t
     ChordTop,
     EdgePost,
     Web,
+    /** IPE pütrel modu: tek çubuk çatı kirişi (mahya sol/sağ); isTruss=false, elasticBeamColumn. */
+    RafterBeam,
     /** Sol/sağ uçta 45° köşe gusset (kolon üzerinde alt hattan aşağı → alt başlık köşesine; kesit alt hat 2×L ile aynı grup). */
     GussetStrip
 };
@@ -172,6 +190,13 @@ public:
     /** Tepe düğümü yüksekliği: L = tam açıklık W → kolonda makas derinliği L/40, ortada L/11 (düz üst hat). */
     static double trussApexHeight_m(const PortalFrameInput &input);
 
+    /**
+     * IPE mahya (elastik kiriş): çatı tasarım yükü q [N/m] yatay izdüşüm → OpenSees `beamUniform` yerel y [N/m arklık].
+     * Düğüm yığını tek elemanlı eğik kirişte span momentini kaçırdığı için `eleLoad` ile kullanılır.
+     */
+    static double rafterRoofUniformLocalY_N_per_m(double q_roof_design_N_per_m, double xi, double yi, double xj,
+                                                  double yj);
+
     /** Fills nodes/members for visualization and for mirroring OpenSees connectivity. */
     static void buildPortalGeometry(const PortalFrameInput &input, PortalFrameResult &out);
 
@@ -187,8 +212,20 @@ public:
     /** z-z Euler kritik kuvvet Ncr [N] — `columnLateralBraceHeightFractionsEffective` ile segmentli veya Kz·H. */
     static double columnElasticCriticalForceZz_N(double E_Pa, double Iz_m4, const PortalFrameInput &input);
 
-    /** Makas çubukları toplam çelik hacmi → yatay izdüşüm m² başına kN/m² (γ≈77 kN/m³). */
+    /**
+     * Makas çeliği ölü yükü — kN/m² (yatay izdüşüm): toplam çubuk ağırlığı / (W·Yref).
+     * `lineLoadsCharacteristic` içinde × gerçek Y ile çizgi yükü; böylece çelik payı da Y ile büyür.
+     */
     static double trussSelfWeightHoriz_kN_per_m2(const PortalFrameInput &input);
+
+    /**
+     * Makas çeliği yüzey dağılımı için referans tributary genişlik Yref [m] (plan alanı W·Yref).
+     * Varsayılan form değeri (7,65 m); çizgi yükünde ×Y uygulanır.
+     */
+    static constexpr double trussSteelDeadTributaryReferenceY_m = 7.65;
+
+    /** Tipik çatı aşığı ölü: 7 kg/m² (yatay izdüşüm) → kN/m²; çizgi yükü = bu × makas aks aralığı Y. */
+    static double roofPurlinDeadSurface_kN_per_m2();
 
     /** Giriş tutarlılığı (analyze / self-check öncesi). */
     bool validate(const PortalFrameInput &in, QString *err) const;

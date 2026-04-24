@@ -35,6 +35,85 @@ uint8_t webOptZoneFromGlobalSeq(int w, int wtot)
     return 2;
 }
 
+QString formatManualStaticCheckBlock(const PortalFrameInput &in, const std::vector<TurkishLoads::StrCombination> &combos,
+                                     const std::vector<PortalFrameResult> &results)
+{
+    if (combos.empty() || combos.size() != results.size()) {
+        return QString();
+    }
+
+    const double W = in.spanWidth_m;
+    const double H = in.columnHeight_m;
+    const double halfSpan = 0.5 * W;
+    const double Ha = PortalSolver::trussApexHeight_m(in);
+    const double rise = std::max(Ha - H, 1e-6);
+    const double trussDepthApprox =
+        std::max(0.5 * (W / 40.0 + W / 11.0), std::max(0.22 * rise, 0.05));
+    const bool pinnedBase = in.columnBaseSupport == ColumnBaseSupport::Pinned;
+
+    QString s = QStringLiteral(
+        "\n\nElle kontrol (yaklaşık denge, kesit seçimini yorumlamak için):\n"
+        "  Çatı q değeri yatay izdüşüm başına düşey hat yükü kabul edilir. Rkol≈q·W/2; "
+        "Mçatı≈q·(W/2)^2/8; Mkol,rüz≈wd·H^2/%1.\n")
+                    .arg(pinnedBase ? QStringLiteral("8") : QStringLiteral("2"));
+
+    for (size_t ci = 0; ci < combos.size(); ++ci) {
+        const auto &co = combos[ci];
+        const auto &r = results[ci];
+
+        double osColN_kN = 0.0;
+        double osColM_kNm = 0.0;
+        double osTrussN_kN = 0.0;
+        double osRafterM_kNm = 0.0;
+        for (const auto &m : r.members) {
+            const double Mi = std::abs(m.moment_i_Nm) / 1000.0;
+            const double Mj = std::abs(m.moment_j_Nm) / 1000.0;
+            if (m.trussRole == TrussMemberRole::Column) {
+                osColN_kN = std::max(osColN_kN, std::abs(m.axial_N) / 1000.0);
+                osColM_kNm = std::max(osColM_kNm, std::max(Mi, Mj));
+            } else if (m.trussRole == TrussMemberRole::RafterBeam) {
+                osRafterM_kNm = std::max(osRafterM_kNm, std::max(Mi, Mj));
+            } else if (m.isTruss) {
+                osTrussN_kN = std::max(osTrussN_kN, std::abs(m.axial_N) / 1000.0);
+            }
+        }
+
+        const double q = co.q_roof_design_kN_m;
+        const double wd = co.w_column_design_kN_m;
+        const double roofTotal_kN = q * W;
+        const double reactionPerColumn_kN = q * halfSpan;
+        const double roofMomentHalf_kNm = q * halfSpan * halfSpan / 8.0;
+        const double windMoment_kNm = pinnedBase ? (wd * H * H / 8.0) : (wd * H * H / 2.0);
+        const double trussAxialApprox_kN = roofMomentHalf_kNm / std::max(trussDepthApprox, 0.05) * 1.05;
+
+        s += QStringLiteral(
+                 "  %1: q=%2 kN/m, wd=%3 kN/m | el: Vçatı=%4 kN, Rkol=%5 kN, "
+                 "Mçatı=%6 kN·m, Mkol,w=%7 kN·m, Nmakas≈%8 kN | OpenSees zarf: "
+                 "Nkol=%9 kN, Mkol=%10 kN·m")
+                 .arg(co.id)
+                 .arg(q, 0, 'g', 6)
+                 .arg(wd, 0, 'g', 6)
+                 .arg(roofTotal_kN, 0, 'g', 6)
+                 .arg(reactionPerColumn_kN, 0, 'g', 6)
+                 .arg(roofMomentHalf_kNm, 0, 'g', 6)
+                 .arg(windMoment_kNm, 0, 'g', 6)
+                 .arg(trussAxialApprox_kN, 0, 'g', 6)
+                 .arg(osColN_kN, 0, 'g', 6)
+                 .arg(osColM_kNm, 0, 'g', 6);
+        if (in.trussMemberSectionForm == 3) {
+            s += QStringLiteral(", Mmahya=%1 kN·m").arg(osRafterM_kNm, 0, 'g', 6);
+        } else {
+            s += QStringLiteral(", Nmakas=%1 kN").arg(osTrussN_kN, 0, 'g', 6);
+        }
+        s += QLatin1Char('\n');
+    }
+
+    s += QStringLiteral(
+        "  Not: Elle değerler hızlı denge kontrolüdür; OpenSees çerçeve sürekliliği, kolon rijitliği ve eleman "
+        "eksenlerini içerdiği için bire bir aynı çıkması beklenmez.\n");
+    return s;
+}
+
 } // namespace
 
 double PortalSolver::trussApexHeight_m(const PortalFrameInput &input)
@@ -45,6 +124,21 @@ double PortalSolver::trussApexHeight_m(const PortalFrameInput &input)
     return (Hc - hEdge) + L / 11.0;
 }
 
+double PortalSolver::rafterRoofUniformLocalY_N_per_m(double q_roof_design_N_per_m, double xi, double yi, double xj,
+                                                     double yj)
+{
+    (void)yi;
+    (void)yj;
+    const double dx = xj - xi;
+    const double dy = yj - yi;
+    const double L = std::hypot(dx, dy);
+    if (L < 1e-12 || std::abs(q_roof_design_N_per_m) < 1e-18) {
+        return 0.0;
+    }
+    const double w_vert_per_m_arc = q_roof_design_N_per_m * std::abs(dx) / L;
+    return -w_vert_per_m_arc * (dx / L);
+}
+
 bool PortalSolver::validate(const PortalFrameInput &in, QString *err) const
 {
     if (in.spanWidth_m <= 0.0 || in.columnHeight_m <= 0.0) {
@@ -53,7 +147,7 @@ bool PortalSolver::validate(const PortalFrameInput &in, QString *err) const
         }
         return false;
     }
-    if (in.columnHeight_m <= in.spanWidth_m / 40.0 + 1e-12) {
+    if (in.trussMemberSectionForm != 3 && in.columnHeight_m <= in.spanWidth_m / 40.0 + 1e-12) {
         if (err) {
             *err = QStringLiteral("Kolon yüksekliği, tam açıklık L üzerinden L/40 alt hat için yeterli olmalıdır.");
         }
@@ -92,6 +186,12 @@ bool PortalSolver::validate(const PortalFrameInput &in, QString *err) const
     if (in.columnFamilyIndex < 0 || in.columnFamilyIndex > 2) {
         if (err) {
             *err = QStringLiteral("Column family index must be 0 (HEA), 1 (HEB), or 2 (IPE).");
+        }
+        return false;
+    }
+    if (in.trussMemberSectionForm < 0 || in.trussMemberSectionForm > 3) {
+        if (err) {
+            *err = QStringLiteral("Makas kesit formu 0 (2×L), 1 (HEA), 2 (HEB) veya 3 (IPE) olmalıdır.");
         }
         return false;
     }
@@ -148,6 +248,14 @@ bool PortalSolver::validate(const PortalFrameInput &in, QString *err) const
         if (f <= 1e-6 || f >= 1.0 - 1e-6) {
             if (err) {
                 *err = QStringLiteral("Column LTB top-flange brace height fractions must be strictly between 0 and 1.");
+            }
+            return false;
+        }
+    }
+    for (double f : in.trussRestraintFractions) {
+        if (f <= 1e-6 || f >= 1.0 - 1e-6) {
+            if (err) {
+                *err = QStringLiteral("Truss restraint fractions must be strictly between 0 and 1.");
             }
             return false;
         }
@@ -221,13 +329,18 @@ PortalFrameResult PortalSolver::analyze(const PortalFrameInput &input) const
     }
     out.errorMessage =
         TurkishLoads::formatRegulatorySummary(ch, part)
+        + QStringLiteral(" [Analizde kullanılan makas aks Y=%1 m — hat yükleri buna göre]")
+              .arg(input.trussAxisSpacingY_m, 0, 'g', 10)
         + QStringLiteral(" OpenSees STR zarf: %1. %2 Kolon: %3, makas: %4.")
               .arg(combIds)
               .arg(out.sectionDesign.envelopeNote)
               .arg(out.sectionDesign.columnProfile)
-              .arg(out.sectionDesign.trussProfile2xL);
-    out.lectureTrussComparisonNote += LectureTrussSolver::formatTrussSectionsCompareBlock(&pass1Design,
-                                                                                          &out.sectionDesign);
+              .arg(out.sectionDesign.trussProfile2xL)
+        + formatManualStaticCheckBlock(input, combos, comboResultsPhysical);
+    if (input.trussMemberSectionForm != 3) {
+        out.lectureTrussComparisonNote += LectureTrussSolver::formatTrussSectionsCompareBlock(&pass1Design,
+                                                                                            &out.sectionDesign);
+    }
     return out;
 }
 
@@ -235,7 +348,6 @@ void PortalSolver::buildPortalGeometry(const PortalFrameInput &input, PortalFram
 {
     const double W = input.spanWidth_m;
     const double Hc = input.columnHeight_m;
-    const double Lhalf = 0.5 * W;
     const double hEdge = W / 40.0;
     const double Ha = trussApexHeight_m(input);
     const int N = input.trussPanelsPerSide;
@@ -253,11 +365,38 @@ void PortalSolver::buildPortalGeometry(const PortalFrameInput &input, PortalFram
         return nr.tag;
     };
 
+    auto addMember = [&](int i, int j, bool truss, bool roofLine, TrussMemberRole role, uint8_t tcLbl = 0,
+                         bool tcLeft = true, uint8_t webOptZone = 0) {
+        MemberResult m;
+        m.tag = static_cast<int>(out.members.size()) + 1;
+        m.nodeI = i;
+        m.nodeJ = j;
+        m.isTruss = truss;
+        m.carriesRoofLineLoad = roofLine;
+        m.trussRole = role;
+        m.topChordLabelNumber = tcLbl;
+        m.topChordLabelOnLeft = tcLeft;
+        m.webOptZone = (truss && role == TrussMemberRole::Web) ? webOptZone : 0;
+        out.members.push_back(m);
+    };
+
     const int idLeftBase = addNode(0.0, 0.0);
     const int idRightBase = addNode(W, 0.0);
     /** Üst hat kolon tepesi (Hc); alt hat tam açıklık L=W için L/40 aşağıda; köşede düşey çubuk yok (ilk çapraz alttan). */
     const int idLeftEave = addNode(0.0, Hc);
     const int idRightEave = addNode(W, Hc);
+
+    addMember(idLeftBase, idLeftEave, false, false, TrussMemberRole::Column);
+    addMember(idRightBase, idRightEave, false, false, TrussMemberRole::Column);
+
+    /** IPE pütrel: Warren yok; yalnızca mahya = iki yarım elastik kiriş (düz çatı hattı). */
+    if (input.trussMemberSectionForm == 3) {
+        const int idApexIpe = addNode(0.5 * W, Ha);
+        addMember(idLeftEave, idApexIpe, false, true, TrussMemberRole::RafterBeam);
+        addMember(idApexIpe, idRightEave, false, true, TrussMemberRole::RafterBeam);
+        return;
+    }
+
     const int idLeftBottom = addNode(0.0, Hc - hEdge);
     const int idRightBottom = addNode(W, Hc - hEdge);
     const int idCrown = addNode(0.5 * W, Hc - hEdge);
@@ -322,24 +461,6 @@ void PortalSolver::buildPortalGeometry(const PortalFrameInput &input, PortalFram
     const int idRightGusCol = addNode(W, std::max(yGusCol, 1e-3));
     const int idRightGusTip = addNode(W - leg, yBotCorner);
 
-    auto addMember = [&](int i, int j, bool truss, bool roofLine, TrussMemberRole role, uint8_t tcLbl = 0,
-                         bool tcLeft = true, uint8_t webOptZone = 0) {
-        MemberResult m;
-        m.tag = static_cast<int>(out.members.size()) + 1;
-        m.nodeI = i;
-        m.nodeJ = j;
-        m.isTruss = truss;
-        m.carriesRoofLineLoad = roofLine;
-        m.trussRole = truss ? role : TrussMemberRole::Column;
-        m.topChordLabelNumber = tcLbl;
-        m.topChordLabelOnLeft = tcLeft;
-        m.webOptZone = (truss && role == TrussMemberRole::Web) ? webOptZone : 0;
-        out.members.push_back(m);
-    };
-
-    addMember(idLeftBase, idLeftEave, false, false, TrussMemberRole::Column);
-    addMember(idRightBase, idRightEave, false, false, TrussMemberRole::Column);
-
     for (int j = 0; j < N; ++j) {
         addMember(bottomLeft[static_cast<size_t>(j)], bottomLeft[static_cast<size_t>(j + 1)], true, false,
                   TrussMemberRole::ChordBottom);
@@ -362,31 +483,33 @@ void PortalSolver::buildPortalGeometry(const PortalFrameInput &input, PortalFram
         addMember(idRightGusCol, idRightGusTip, true, false, TrussMemberRole::GussetStrip);
     }
 
+    /** Tam açıklıkta 2N köşegen var; bölge indeksi simetrik çiftler için aynı olmalı (sol j ↔ sağ j). */
     const int wtot = 2 * N;
-    int webSeq = 0;
     for (int j = 0; j < N; ++j) {
         const bool zig = (j % 2) == 0;
-        const uint8_t zL = webOptZoneFromGlobalSeq(webSeq++, wtot);
-        const uint8_t zR = webOptZoneFromGlobalSeq(webSeq++, wtot);
+        const uint8_t zWeb = webOptZoneFromGlobalSeq(2 * j, wtot);
         if (zig) {
             addMember(bottomLeft[static_cast<size_t>(j)], topLeft[static_cast<size_t>(j + 1)], true, false,
-                      TrussMemberRole::Web, 0, true, zL);
+                      TrussMemberRole::Web, 0, true, zWeb);
             addMember(bottomRight[static_cast<size_t>(j)], topRight[static_cast<size_t>(j + 1)], true, false,
-                      TrussMemberRole::Web, 0, true, zR);
+                      TrussMemberRole::Web, 0, true, zWeb);
         } else {
             addMember(topLeft[static_cast<size_t>(j)], bottomLeft[static_cast<size_t>(j + 1)], true, false,
-                      TrussMemberRole::Web, 0, true, zL);
+                      TrussMemberRole::Web, 0, true, zWeb);
             addMember(topRight[static_cast<size_t>(j)], bottomRight[static_cast<size_t>(j + 1)], true, false,
-                      TrussMemberRole::Web, 0, true, zR);
+                      TrussMemberRole::Web, 0, true, zWeb);
         }
     }
 }
 
 std::vector<double> PortalSolver::columnTrussDerivedBraceHeightFractions(const PortalFrameInput &input)
 {
+    std::vector<double> out;
+    if (input.trussMemberSectionForm == 3) {
+        return out;
+    }
     const double W = input.spanWidth_m;
     const double Hc = input.columnHeight_m;
-    std::vector<double> out;
     if (Hc < 1e-9 || W < 1e-9) {
         return out;
     }
@@ -474,6 +597,18 @@ double PortalSolver::trussSelfWeightHoriz_kN_per_m2(const PortalFrameInput &inpu
 {
     PortalFrameResult geom;
     buildPortalGeometry(input, geom);
+    if (input.trussMemberSectionForm == 3) {
+        const double Ha = trussApexHeight_m(input);
+        const double Hc = input.columnHeight_m;
+        const double W = input.spanWidth_m;
+        const double halfLen = std::hypot(0.5 * W, std::max(Ha - Hc, 1e-12));
+        const double trussLen_m = 2.0 * halfLen;
+        constexpr double gammaSteel_kN_per_m3 = 77.0;
+        const double weight_kN = gammaSteel_kN_per_m3 * input.steelArea_m2 * trussLen_m;
+        const double footprint_m2 =
+            std::max(W, 1e-12) * std::max(PortalSolver::trussSteelDeadTributaryReferenceY_m, 1e-12);
+        return weight_kN / footprint_m2;
+    }
     double trussLen_m = 0.0;
     auto nodeXY = [&](int tag, double &ox, double &oy) -> bool {
         for (const auto &n : geom.nodes) {
@@ -500,17 +635,27 @@ double PortalSolver::trussSelfWeightHoriz_kN_per_m2(const PortalFrameInput &inpu
     }
     constexpr double gammaSteel_kN_per_m3 = 77.0;
     const double weight_kN = gammaSteel_kN_per_m3 * input.steelArea_m2 * trussLen_m;
+    const double W = input.spanWidth_m;
     const double footprint_m2 =
-        std::max(input.spanWidth_m, 1e-12) * std::max(input.trussAxisSpacingY_m, 1e-12);
+        std::max(W, 1e-12) * std::max(PortalSolver::trussSteelDeadTributaryReferenceY_m, 1e-12);
     return weight_kN / footprint_m2;
+}
+
+double PortalSolver::roofPurlinDeadSurface_kN_per_m2()
+{
+    constexpr double kAsikDead_kg_per_horizontal_m2 = 7.0;
+    constexpr double kGrav = 9.80665;
+    return kAsikDead_kg_per_horizontal_m2 * kGrav / 1000.0;
 }
 
 TurkishLoads::CharacteristicLineLoadsPerM PortalFrameInput::lineLoadsCharacteristic() const
 {
     const double S = std::max(trussAxisSpacingY_m, 1e-12);
     TurkishLoads::CharacteristicLineLoadsPerM c;
+    /** Makas çeliği kN/m² tabanı W·Yref; ×S ile çelik çizgi yükü S ile orantılı (tüm dl1 bileşenleri Y’ye bağlı). */
     const double trussHoriz = PortalSolver::trussSelfWeightHoriz_kN_per_m2(*this);
-    c.dl1 = (trussHoriz + purlinCladding_kN_per_m2) * S;
+    const double asikSurface_kN_per_m2 = PortalSolver::roofPurlinDeadSurface_kN_per_m2();
+    c.dl1 = (trussHoriz + asikSurface_kN_per_m2 + purlinCladding_kN_per_m2) * S;
     c.dl2 = dl2_kN_per_m2 * S;
     constexpr double kSnowRoofShapeMu = 0.8;
     c.sn = sk_kN_per_m2 * kSnowRoofShapeMu * S;

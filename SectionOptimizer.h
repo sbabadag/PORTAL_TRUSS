@@ -17,7 +17,7 @@ struct SectionOptimizationResult
 {
     QString columnProfile;
     double columnUtilization{0.0}; ///< zarf η (tüm STR)
-    /** Makas 2×L: üst/alt hat; köşegen B/C/D sanal bölgeleri (kenar post varsa ayrı). */
+    /** Makas kesiti (2×L veya hadde I adı): üst/alt hat; köşegen B/C/D sanal bölgeleri (kenar post varsa ayrı). */
     QString trussTopChord2xL;
     double trussTopChordUtilization{0.0};
     QString trussBottomChord2xL;
@@ -32,9 +32,13 @@ struct SectionOptimizationResult
     double trussWebCUtilization{0.0};
     QString trussWebD2xL;
     double trussWebDUtilization{0.0};
-    /** Özet / geriye uyumluluk: en yüksek η; trussProfile2xL kısa özet metin. */
+    /** Özet / geriye uyumluluk: en yüksek η; kısa özet metin (2×L veya IPE/HEA/HEB). */
     QString trussProfile2xL;
     double trussUtilization{0.0};
+    /** IPE pütrel (mahya) tek kiriş modu — iki yarım segment aynı IPE. */
+    QString rafterBeamProfile;
+    double rafterBeamUtilization{0.0};
+    QString governingRafterCombinationId;
     /** Kolon / makas için zarfı belirleyen kombinasyon kodları (bilgi). */
     QString governingColumnCombinationId;
     QString governingTrussCombinationId;
